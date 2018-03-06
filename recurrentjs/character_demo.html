@@ -270,11 +270,13 @@ var loadModel = function(j) {
 
 var forwardIndex = function(G, model, ix, prev) {
   var x = G.rowPluck(model['Wil'], ix);
-  // forward prop the sequence learner
+  // TODO: forward prop the sequence learner
   if(generator === 'rnn') {
-    var out_struct = R.forwardRNN(G, model, hidden_sizes, x, prev);
+    // RNN
+    //var out_struct = R.forwardRNN( , , , , );
   } else {
-    var out_struct = R.forwardLSTM(G, model, hidden_sizes, x, prev);
+    // LSTM
+    //var out_struct = R.forwardLSTM( , , , , );
   }
   return out_struct;
 }

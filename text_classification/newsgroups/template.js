@@ -5,32 +5,30 @@
  * 
  * You should modify it by adding additional hidden layers, trying different 
  * regularization methods (dropout, weight decay, etc.). Alternatively, you can load 
- * GloVe word embeddings with the GloveEmbedding helper class and implement a deep 
- * averaging network (DAN). You should include the results - both positive and negative - 
+ * GloVe word embeddings with the GloveEmbedding helper class. You should include the results - both positive and negative - 
  * for all the models you tried.
  * 
  * If you prefer, you can also complete this assignment offline with your standard 
  * IDE by modifying cloning the below repository and modifying template.js.
  *
- *   > https://github.com/k15z/6s198.kevz.me/tree/master/newsgroups
+ *   > https://github.com/mintingle/rnn-6s198/tree/master/text_classification/newsgroups 
  * 
- * Both approaches will yield identical results.
  */
 buildModel = (dataset) => {
     // misc. hyperparmeters
-    // TODO: add your parameters for dropout, weight decay, etc. here
+    // TODO: add your parameters (optional) for dropout, weight decay, etc. here
     const batch_size = 32;
 
     // construct the computation graph
     const g = new deeplearn.Graph();
-    const math = new deeplearn.NDArrayMathGPU();
+    const math = deeplearn.ENV.math;
 
     // create placeholders for the inputs
     const inputTensor = g.placeholder('input', [dataset.input_dims]);
     const labelTensor = g.placeholder('label', [be.label_dims]);
 
     // add a single feedforward layer
-    // TODO: try multiple layers, add dropout, etc.
+    // TODO: try multiple layers, or other modifications
     const outputTensor = g.layers.dense('dense_layer', inputTensor, dataset.output_dims, undefined, true);
 
     // loss functions
@@ -81,8 +79,8 @@ buildModel = (dataset) => {
 }
 
 // download the dataset, the helper classes BagOfWordsEmbedding and BinaryEncoder can
-// be found at: https://6s198.kevz.me/newsgroups/helpers.js
-$.get("/data/newsgroups.json", (dataset) => {
+// be found at: https://courses.csail.mit.edu/6.s198/spring-2018/rnn-assignment/text_classification/newsgroups/helpers.js
+$.get("data/newsgroups.json", (dataset) => {
     // keep track of the number of test/train samples
     dataset.nb_test = dataset.testY.length
     dataset.nb_train = dataset.trainY.length

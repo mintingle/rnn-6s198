@@ -6,9 +6,9 @@ import tensorflow as tf
 from nltk import word_tokenize
 from sklearn.preprocessing import LabelBinarizer
 
-with open("../data/glove.json", "rt") as fin:
+with open("6.s198/spring-2018/rnn-assignment/text_classification/data/glove.json", "rt") as fin:
     glove = json.load(fin)
-with open("../data/newsgroups.json", "rt") as fin:
+with open("6.s198/spring-2018/rnn-assignment/text_classification/data/newsgroups.json", "rt") as fin:
     newsgroups = json.load(fin)
 
 def word_vector(text):
