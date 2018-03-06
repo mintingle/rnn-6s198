@@ -1,0 +1,3988 @@
+<html>
+<head>
+<title>RecurrentJS Sentence Memorization Demo</title>
+
+<style>
+body {
+  font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+  color: #333;
+  padding: 20px;
+}
+#argmax {
+  background-color: #DFD;
+}
+#ppl {
+  color: #090;
+  font-size: 20px;
+}
+#epoch {
+  color: #900;
+  font-size: 20px;
+}
+.apred {
+  padding: 2px;
+  margin: 5px;
+  overflow: hidden;
+  height: 20px;
+  font-size: 14px;
+}
+#prepro_status {
+  background-color: #FFD;
+  padding: 5px;
+}
+#status {
+  padding: 2px;
+  margin-top: 5px;
+}
+#controls {
+  margin: 5px;
+}
+.theslider {
+  width:90%;
+  display: inline-block;
+}
+.slider_value {
+  width: 9%;
+  display: inline-block;
+}
+#wrap {
+  width: 800px;
+  margin-right: auto;
+  margin-left: auto;
+  margin-bottom: 10px;
+}
+.abutton {
+  width: 120px;
+  height: 30px;
+  margin: 10px 10px 10px 0px;
+}
+.hh {
+  background-color: #EEE;
+  padding: 5px;
+  margin-top: 5px;
+  border-bottom: 1px solid #999;
+  margin-bottom: 2px;
+}
+#pplgraph {
+  float: right;
+}
+#intro {
+  text-align: justify;
+}
+</style>
+<link href="external/jquery-ui.min.css" rel="stylesheet">
+
+<script src="external/jquery-1.8.3.min.js"></script>
+<script src="external/jquery-ui.min.js"></script>
+
+<script src="src/recurrent.js"></script>
+<script src="src/vis.js"></script>
+
+<script type="text/javascript">
+
+// prediction params
+var sample_softmax_temperature = 1.0; // how peaky model predictions should be
+var max_chars_gen = 100; // max length of generated sentences
+
+// various global var inits
+var epoch_size = -1;
+var input_size = -1;
+var output_size = -1;
+var letterToIndex = {};
+var indexToLetter = {};
+var vocab = [];
+var data_sents = [];
+var solver = new R.Solver(); // should be class because it needs memory for step caches
+var pplGraph = new Rvis.Graph();
+
+var model = {};
+
+var initVocab = function(sents, count_threshold) {
+  // go over all characters and keep track of all unique ones seen
+  var txt = sents.join(''); // concat all
+
+  // count up all characters
+  var d = {};
+  for(var i=0,n=txt.length;i<n;i++) {
+    var txti = txt[i];
+    if(txti in d) { d[txti] += 1; } 
+    else { d[txti] = 1; }
+  }
+
+  // filter by count threshold and create pointers
+  letterToIndex = {};
+  indexToLetter = {};
+  vocab = [];
+  // NOTE: start at one because we will have START and END tokens!
+  // that is, START token will be index 0 in model letter vectors
+  // and END token will be index 0 in the next character softmax
+  var q = 1; 
+  for(ch in d) {
+    if(d.hasOwnProperty(ch)) {
+      if(d[ch] >= count_threshold) {
+        // add character to vocab
+        letterToIndex[ch] = q;
+        indexToLetter[q] = ch;
+        vocab.push(ch);
+        q++;
+      }
+    }
+  }
+
+  // globals written: indexToLetter, letterToIndex, vocab (list), and:
+  input_size = vocab.length + 1;
+  output_size = vocab.length + 1;
+  epoch_size = sents.length;
+  $("#prepro_status").text('found ' + vocab.length + ' distinct characters: ' + vocab.join(''));
+}
+
+var utilAddToModel = function(modelto, modelfrom) {
+  for(var k in modelfrom) {
+    if(modelfrom.hasOwnProperty(k)) {
+      // copy over the pointer but change the key to use the append
+      modelto[k] = modelfrom[k];
+    }
+  }
+}
+
+var initModel = function() {
+  // letter embedding vectors
+  var model = {};
+  model['Wil'] = new R.RandMat(input_size, letter_size , 0, 0.08);
+  
+  if(generator === 'rnn') {
+    var rnn = R.initRNN(letter_size, hidden_sizes, output_size);
+    utilAddToModel(model, rnn);
+  } else {
+    var lstm = R.initLSTM(letter_size, hidden_sizes, output_size);
+    utilAddToModel(model, lstm);
+  }
+
+  return model;
+}
+
+var reinit_learning_rate_slider = function() {
+  // init learning rate slider for controlling the decay
+  // note that learning_rate is a global variable
+  $("#lr_slider").slider({
+    min: Math.log10(0.01) - 3.0,
+    max: Math.log10(0.01) + 0.05,
+    step: 0.05,
+    value: Math.log10(learning_rate),
+    slide: function( event, ui ) {
+      learning_rate = Math.pow(10, ui.value);
+      $("#lr_text").text(learning_rate.toFixed(5));
+    }
+  });
+  $("#lr_text").text(learning_rate.toFixed(5));
+}
+
+var reinit = function() {
+  // note: reinit writes global vars
+  
+  // eval options to set some globals
+  eval($("#newnet").val());
+
+  reinit_learning_rate_slider();
+
+  solver = new R.Solver(); // reinit solver
+  pplGraph = new Rvis.Graph();
+
+  ppl_list = [];
+  tick_iter = 0;
+
+  // process the input, filter out blanks
+  var data_sents_raw_1 = $('#ti1').val().split('\n');
+  var data_sents_raw_2 = $('#ti2').val().split('\n');
+  var data_sents_raw = data_sents_raw_1.concat(data_sents_raw_2);
+  data_sents = [];
+  for(var i=0;i<data_sents_raw.length;i++) {
+    var sent = data_sents_raw[i].trim();
+    if(sent.length > 0) {
+      data_sents.push(sent);
+    }
+  }
+
+  initVocab(data_sents, 1); // takes count threshold for characters
+  model = initModel();
+}
+
+var saveModel = function() {
+  var out = {};
+  out['hidden_sizes'] = hidden_sizes;
+  out['generator'] = generator;
+  out['letter_size'] = letter_size;
+  var model_out = {};
+  for(var k in model) {
+    if(model.hasOwnProperty(k)) {
+      model_out[k] = model[k].toJSON();
+    }
+  }
+  out['model'] = model_out;
+  var solver_out = {};
+  solver_out['decay_rate'] = solver.decay_rate;
+  solver_out['smooth_eps'] = solver.smooth_eps;
+  step_cache_out = {};
+  for(var k in solver.step_cache) {
+    if(solver.step_cache.hasOwnProperty(k)) {
+      step_cache_out[k] = solver.step_cache[k].toJSON();
+    }
+  }
+  solver_out['step_cache'] = step_cache_out;
+  out['solver'] = solver_out;
+  out['letterToIndex'] = letterToIndex;
+  out['indexToLetter'] = indexToLetter;
+  out['vocab'] = vocab;
+  $("#tio").val(JSON.stringify(out));
+}
+
+var loadModel = function(j) {
+  hidden_sizes = j.hidden_sizes;
+  generator = j.generator;
+  letter_size = j.letter_size;
+  model = {};
+  for(var k in j.model) {
+    if(j.model.hasOwnProperty(k)) {
+      var matjson = j.model[k];
+      model[k] = new R.Mat(1,1);
+      model[k].fromJSON(matjson);
+    }
+  }
+  solver = new R.Solver(); // have to reinit the solver since model changed
+  solver.decay_rate = j.solver.decay_rate;
+  solver.smooth_eps = j.solver.smooth_eps;
+  solver.step_cache = {};
+  for(var k in j.solver.step_cache){
+      if(j.solver.step_cache.hasOwnProperty(k)){
+          var matjson = j.solver.step_cache[k];
+          solver.step_cache[k] = new R.Mat(1,1);
+          solver.step_cache[k].fromJSON(matjson);
+      }
+  }
+  letterToIndex = j['letterToIndex'];
+  indexToLetter = j['indexToLetter'];
+  vocab = j['vocab'];
+
+  // reinit these
+  ppl_list = [];
+  tick_iter = 0;
+}
+
+var forwardIndex = function(G, model, ix, prev) {
+  var x = G.rowPluck(model['Wil'], ix);
+  // forward prop the sequence learner
+  if(generator === 'rnn') {
+    var out_struct = R.forwardRNN(G, model, hidden_sizes, x, prev);
+  } else {
+    var out_struct = R.forwardLSTM(G, model, hidden_sizes, x, prev);
+  }
+  return out_struct;
+}
+
+var predictSentence = function(model, samplei, temperature) {
+  if(typeof samplei === 'undefined') { samplei = false; }
+  if(typeof temperature === 'undefined') { temperature = 1.0; }
+
+  var G = new R.Graph(false);
+  var s = '';
+  var prev = {};
+  while(true) {
+
+    // RNN tick
+    var ix = s.length === 0 ? 0 : letterToIndex[s[s.length-1]];
+    var lh = forwardIndex(G, model, ix, prev);
+    prev = lh;
+
+    // sample predicted letter
+    logprobs = lh.o;
+    if(temperature !== 1.0 && samplei) {
+      // scale log probabilities by temperature and renormalize
+      // if temperature is high, logprobs will go towards zero
+      // and the softmax outputs will be more diffuse. if temperature is
+      // very low, the softmax outputs will be more peaky
+      for(var q=0,nq=logprobs.w.length;q<nq;q++) {
+        logprobs.w[q] /= temperature;
+      }
+    }
+
+    probs = R.softmax(logprobs);
+    if(samplei) {
+      var ix = R.samplei(probs.w);
+    } else {
+      var ix = R.maxi(probs.w);  
+    }
+    
+    if(ix === 0) break; // END token predicted, break out
+    if(s.length > max_chars_gen) { break; } // something is wrong
+
+    var letter = indexToLetter[ix];
+    s += letter;
+  }
+  return s;
+}
+
+var costfun = function(model, sent) {
+  // takes a model and a sentence and
+  // calculates the loss. Also returns the Graph
+  // object which can be used to do backprop
+  var n = sent.length;
+  var G = new R.Graph();
+  var log2ppl = 0.0;
+  var cost = 0.0;
+  var prev = {};
+  for(var i=-1;i<n;i++) {
+    // start and end tokens are zeros
+    var ix_source = i === -1 ? 0 : letterToIndex[sent[i]]; // first step: start with START token
+    var ix_target = i === n-1 ? 0 : letterToIndex[sent[i+1]]; // last step: end with END token
+
+    lh = forwardIndex(G, model, ix_source, prev);
+    prev = lh;
+
+    // set gradients into logprobabilities
+    logprobs = lh.o; // interpret output as logprobs
+    probs = R.softmax(logprobs); // compute the softmax probabilities
+
+    log2ppl += -Math.log2(probs.w[ix_target]); // accumulate base 2 log prob and do smoothing
+    cost += -Math.log(probs.w[ix_target]);
+
+    // write gradients into log probabilities
+    logprobs.dw = probs.w;
+    logprobs.dw[ix_target] -= 1
+  }
+  var ppl = Math.pow(2, log2ppl / (n - 1));
+  return {'G':G, 'ppl':ppl, 'cost':cost};
+}
+
+function median(values) {
+  values.sort( function(a,b) {return a - b;} );
+  var half = Math.floor(values.length/2);
+  if(values.length % 2) return values[half];
+  else return (values[half-1] + values[half]) / 2.0;
+}
+
+var ppl_list = [];
+var tick_iter = 0;
+var tick = function() {
+
+  // sample sentence fromd data
+  var sentix = R.randi(0,data_sents.length);
+  var sent = data_sents[sentix];
+
+  var t0 = +new Date();  // log start timestamp
+
+  // evaluate cost function on a sentence
+  var cost_struct = costfun(model, sent);
+  
+  // use built up graph to compute backprop (set .dw fields in mats)
+  cost_struct.G.backward();
+  // perform param update
+  var solver_stats = solver.step(model, learning_rate, regc, clipval);
+  //$("#gradclip").text('grad clipped ratio: ' + solver_stats.ratio_clipped)
+
+  var t1 = +new Date();
+  var tick_time = t1 - t0;
+
+  ppl_list.push(cost_struct.ppl); // keep track of perplexity
+
+  // evaluate now and then
+  tick_iter += 1;
+  if(tick_iter % 50 === 0) {
+    // draw samples
+    $('#samples').html('');
+    for(var q=0;q<5;q++) {
+      var pred = predictSentence(model, true, sample_softmax_temperature);
+      var pred_div = '<div class="apred">'+pred+'</div>'
+      $('#samples').append(pred_div);
+    }
+  }
+  if(tick_iter % 10 === 0) {
+    // draw argmax prediction
+    $('#argmax').html('');
+    var pred = predictSentence(model, false);
+    var pred_div = '<div class="apred">'+pred+'</div>'
+    $('#argmax').append(pred_div);
+
+    // keep track of perplexity
+    $('#epoch').text('epoch: ' + (tick_iter/epoch_size).toFixed(2));
+    $('#ppl').text('perplexity: ' + cost_struct.ppl.toFixed(2));
+    $('#ticktime').text('forw/bwd time per example: ' + tick_time.toFixed(1) + 'ms');
+
+    if(tick_iter % 100 === 0) {
+      var median_ppl = median(ppl_list);
+      ppl_list = [];
+      pplGraph.add(tick_iter, median_ppl);
+      pplGraph.drawSelf(document.getElementById("pplgraph"));
+    }
+  }
+}
+
+var gradCheck = function() {
+  var model = initModel();
+  var sent = '^test sentence$';
+  var cost_struct = costfun(model, sent);
+  cost_struct.G.backward();
+  var eps = 0.000001;
+
+  for(var k in model) {
+    if(model.hasOwnProperty(k)) {
+      var m = model[k]; // mat ref
+      for(var i=0,n=m.w.length;i<n;i++) {
+        
+        oldval = m.w[i];
+        m.w[i] = oldval + eps;
+        var c0 = costfun(model, sent);
+        m.w[i] = oldval - eps;
+        var c1 = costfun(model, sent);
+        m.w[i] = oldval;
+
+        var gnum = (c0.cost - c1.cost)/(2 * eps);
+        var ganal = m.dw[i];
+        var relerr = (gnum - ganal)/(Math.abs(gnum) + Math.abs(ganal));
+        if(relerr > 1e-1) {
+          console.log(k + ': numeric: ' + gnum + ', analytic: ' + ganal + ', err: ' + relerr);
+        }
+      }
+    }
+  }
+}
+
+var iid = null;
+$(function() {
+
+  // attach button handlers
+  $('#learn').click(function(){ 
+    reinit();
+    if(iid !== null) { clearInterval(iid); }
+    iid = setInterval(tick, 0); 
+  });
+  $('#stop').click(function(){ 
+    if(iid !== null) { clearInterval(iid); }
+    iid = null;
+  });
+  $("#resume").click(function(){
+    if(iid === null) {
+      iid = setInterval(tick, 0); 
+    }
+  });
+
+  $("#savemodel").click(saveModel);
+  $("#loadmodel").click(function(){
+    var j = JSON.parse($("#tio").val());
+    loadModel(j);
+  });
+
+  $("#loadpretrained").click(function(){
+    $.getJSON("lstm_100_model.json", function(data) {
+      pplGraph = new Rvis.Graph();
+      learning_rate = 0.0001;
+      reinit_learning_rate_slider();
+      loadModel(data);
+    });
+  });
+
+  $("#learn").click(); // simulate click on startup
+
+  //$('#gradcheck').click(gradCheck);
+
+  $("#temperature_slider").slider({
+    min: -1,
+    max: 1.05,
+    step: 0.05,
+    value: 0,
+    slide: function( event, ui ) {
+      sample_softmax_temperature = Math.pow(10, ui.value);
+      $("#temperature_text").text( sample_softmax_temperature.toFixed(2) );
+    }
+  });
+});
+
+</script>
+</head>
+
+<body>
+
+
+<div id="wrap">
+  <h1>Deep Recurrent Nets character generation demo</h1>
+  </div>
+  <div>
+    <div class="hh">Input sentences:</div>
+    <h3> Source 1 (default: Adele) </h3>
+    <textarea style="width:100%; height:200px;" id="ti1">
+Looking for some education
+Made my way into the night
+All that bullshit conversation
+Baby, can't you read the signs? I won't bore you with the details, baby
+I don't even wanna waste your time
+Let's just say that maybe
+You could help me ease my mind
+I ain't Mr. Right But if you're looking for fast love
+If that's love in your eyes
+It's more than enough
+Had some bad love
+So fast love is all that I've got on my mind Ooh, ooh
+Ooh, ooh Looking for some affirmation
+Made my way into the sun
+My friends got their ladies
+And they're all having babies
+I just wanna have some fun I won't bore you with the details, baby
+I don't even wanna waste your time
+Let's just say that maybe
+You could help me ease my mind
+I ain't Mr. Right But if you're looking for fast love
+If that's love in your eyes
+It's more than enough
+I've had some bad love
+So fast love is all that I've got on my mind Ooh, ooh
+Baby, baby
+Ooh, ooh
+Baby, baby
+Ooh, ooh
+Baby, baby
+Ooh In the absence of security
+I made my way into the night
+Stupid cupid keeps on calling me
+And I see nothing in his eyes
+I miss my baby
+Oh I, I miss my baby
+I miss my baby
+I miss, I miss, I miss, I miss my baby
+Ooh I, I miss my baby I don't want you to be no slave
+I don't want you to work all day
+But I want you to be true
+And I just want to make love to you
+Love to you, ooh baby
+Love to you, yeah All I want to do is wash your clothes
+I don't want to keep you indoors
+There is nothing you can't do
+But keep me making love to me
+Love to me, ooh baby
+Love to you, yeah And I can tell by the way you walk that walk
+And I can hear by the way you talk that talk
+And I can know by the way you treat your girl
+That I can give you all the loving in the whole wide world All I want you to do is make your bread
+Just to make sure you're well fed
+I don't want you sad and blue
+And I just want to make love to you
+Love to you, ooh yeah
+Love to you, yeah And I can tell by the way you walk that walk
+And I can hear by the way you talk that talk
+And I can know by the way you treat your girl
+That I can give you all the loving in the whole wide world All I want you to do baby is make your bread
+Just to make sure you're well fed
+I don't want you sad and blue
+And I just want to make love to you
+Love to you, ooh yeah
+Love to you, yeah
+Oh I just want to make love to you Happy New Year! I heard that you're settled down
+That you found a girl and you're married now
+I heard that your dreams came true
+Guess she gave you things I didn't give to you Old friend, why are you so shy?
+Ain't like you to hold back or hide from the light I hate to turn up out of the blue, uninvited
+But I couldn't stay away, I couldn't fight it
+I had hoped you'd see my face and that you'd be reminded
+That for me, it isn't over Never mind, I'll find someone like you
+I wish nothing but the best for you two
+Don't forget me, I beg, I remember you said
+Sometimes it lasts in love, but sometimes it hurts instead
+Sometimes it lasts in love, but sometimes it hurts instead You know how the time flies
+Only yesterday was the time of our lives
+We were born and raised in a summer haze
+Bound by the surprise of our glory days I hate to turn up out of the blue, uninvited
+But I couldn't stay away, I couldn't fight it
+I had hoped you'd see my face and that you'd be reminded
+That for me, it isn't over Never mind, I'll find someone like you
+I wish nothing but the best for you two
+Don't forget me, I beg, I remember you said
+Sometimes it lasts in love, but sometimes it hurts instead, yeah Nothing compares, no worries or cares
+Regrets and mistakes, they're memories made
+Who would have known how bittersweet this would taste? Never mind, I'll find someone like you
+I wish nothing but the best for you
+Don't forget me, I beg, I remember you said
+Sometimes it lasts in love, but sometimes it hurts instead Never mind, I'll find someone like you
+I wish nothing but the best for you two
+Don't forget me, I beg, I remember you said
+Sometimes it lasts in love, but sometimes it hurts instead
+Sometimes it lasts in love, but sometimes it hurts instead There's a fire starting in my heart
+Reaching a fever pitch, it's bringing me out the dark
+Finally I can see you crystal clear
+[Clean version:] Go 'head and sell me out and I'll lay your ship bare
+[Explicit version:] Go 'head and sell me out and I'll lay your shit bare
+See how I leave with every piece of you
+Don't underestimate the things that I will do There's a fire starting in my heart
+Reaching a fever pitch
+And it's bringing me out the dark The scars of your love remind me of us
+They keep me thinking that we almost had it all
+The scars of your love, they leave me breathless
+I can't help feeling
+We could have had it all
+(You're gonna wish you never had met me)
+Rolling in the deep
+(Tears are gonna fall, rolling in the deep)
+You had my heart inside of your hand
+(You're gonna wish you never had met me)
+And you played it, to the beat
+(Tears are gonna fall, rolling in the deep) Baby, I have no story to be told
+But I've heard one on you
+And I'm gonna make your head burn
+Think of me in the depths of your despair
+Make a home down there
+As mine sure won't be shared (You're gonna wish you never had met me)
+The scars of your love remind me of us
+(Tears are gonna fall, rolling in the deep)
+They keep me thinking that we almost had it all
+(You're gonna wish you never had met me)
+The scars of your love, they leave me breathless
+(Tears are gonna fall, rolling in the deep)
+I can't help feeling
+We could have had it all
+(You're gonna wish you never had met me)
+Rolling in the deep
+(Tears are gonna fall, rolling in the deep)
+You had my heart inside of your hand
+(You're gonna wish you never had met me)
+And you played it, to the beat
+(Tears are gonna fall, rolling in the deep)
+We could have had it all
+Rolling in the deep
+You had my heart inside of your hand
+But you played it, with a beating Throw your soul through every open door (woah)
+Count your blessings to find what you look for (woah)
+Turn my sorrow into treasured gold (woah)
+You'll pay me back in kind and reap just what you sow (woah)
+(You're gonna wish you never had met me)
+We could have had it all
+(Tears are gonna fall, rolling in the deep)
+We could have had it all
+(You're gonna wish you never had met me)
+It all, it all, it all
+(Tears are gonna fall, rolling in the deep) We could have had it all
+(You're gonna wish you never had met me)
+Rolling in the deep
+(Tears are gonna fall, rolling in the deep)
+You had my heart inside of your hand
+(You're gonna wish you never had met me)
+And you played it to the beat
+(Tears are gonna fall, rolling in the deep) We could have had it all
+(You're gonna wish you never had met me)
+Rolling in the deep
+(Tears are gonna fall, rolling in the deep)
+You had my heart inside of your hand
+(You're gonna wish you never had met me) But you played it
+You played it
+You played it
+You played it to the beat. Hello, it's me
+I was wondering if after all these years you'd like to meet
+To go over everything
+They say that time's supposed to heal ya
+But I ain't done much healing Hello, can you hear me?
+I'm in California dreaming about who we used to be
+When we were younger and free
+I've forgotten how it felt before the world fell at our feet There's such a difference between us
+And a million miles Hello from the other side
+I must've called a thousand times
+To tell you I'm sorry
+For everything that I've done
+But when I call you never
+Seem to be home Hello from the outside
+At least I can say that I've tried
+To tell you I'm sorry
+For breaking your heart
+But it don't matter, it clearly
+Doesn't tear you apart anymore Hello, how are you?
+It's so typical of me to talk about myself, I'm sorry
+I hope that you're well
+Did you ever make it out of that town
+Where nothing ever happened? It's no secret
+That the both of us
+Are running out of time So hello from the other side (other side)
+I must've called a thousand times (thousand times)
+To tell you I'm sorry
+For everything that I've done
+But when I call you never
+Seem to be home Hello from the outside (outside)
+At least I can say that I've tried (I've tried)
+To tell you I'm sorry
+For breaking your heart
+But it don't matter, it clearly
+Doesn't tear you apart anymore Oh, anymore
+Oh, anymore
+Oh, anymore
+Anymore Hello from the other side (other side)
+I must've called a thousand times (thousand times)
+To tell you I'm sorry
+For everything that I've done
+But when I call you never
+Seem to be home Hello from the outside (outside)
+At least I can say that I've tried (I've tried)
+To tell you I'm sorry
+For breaking your heart
+But it don't matter, it clearly
+Doesn't tear you apart anymore I will leave my heart at the door
+I won't say a word
+They've all been said before you know
+So why don't we just play pretend
+Like we're not scared of what's coming next
+Or scared of having nothing left Look, don't get me wrong
+I know there is no tomorrow
+All I ask is If this is my last night with you
+Hold me like I'm more than just a friend
+Give me a memory I can use
+Take me by the hand while we do what lovers do
+It matters how this ends
+'Cause what if I never love again? I don't need your honesty
+It's already in your eyes
+And I'm sure my eyes, they speak for me
+No one knows me like you do
+And since you're the only one that matters
+Tell me who do I run to? Look, don't get me wrong
+I know there is no tomorrow
+All I ask is If this is my last night with you
+Hold me like I'm more than just a friend
+Give me a memory I can use
+Take me by the hand while we do what lovers do
+It matters how this ends
+'Cause what if I never love again? Let this be our lesson in love
+Let this be the way we remember us
+I don't wanna be cruel or vicious
+And I ain't asking for forgiveness
+All I ask is If this is my last night with you
+Hold me like I'm more than just a friend
+Give me a memory I can use
+Take me by the hand while we do what lovers do
+It matters how this ends
+'Cause what if I never love again? I let it fall, my heart,
+And as it fell you rose to claim it
+It was dark and I was over
+Until you kissed my lips and you saved me My hands, they're strong
+But my knees were far too weak
+To stand in your arms
+Without falling to your feet But there's a side to you that I never knew, never knew
+All the things you'd say, they were never true, never true
+And the games you'd play, you would always win, always win But I set fire to the rain
+Watched it pour as I touched your face
+Let it burn while I cry
+'Cause I heard it screaming out your name, your name When laying with you
+I could stay there, close my eyes
+Feel you here, forever
+You and me together, nothing gets better Cause there's a side to you that I never knew, never knew
+All the things you'd say, they were never true, never true
+And the games you'd play, you would always win, always win But I set fire to the rain
+Watched it pour as I touched your face
+Let it burn while I cried
+'Cause I heard it screaming out your name, your name I set fire to the rain
+And I threw us into the flames
+Where I felt something die, 'cause I knew that
+That was the last time, the last time Sometimes I wake up by the door
+As if that heart you caught is still waiting for you
+Even now when it's already over
+I can't help myself from looking for you I set fire to the rain
+Watched it pour as I touched your face
+Let it burn while I cried
+'Cause I heard it screaming out your name, your name I set fire to the rain
+And I threw us into the flames
+Where I felt something die
+'Cause I knew that that was the last time, the last time, oh
+Oh, oh Let it burn, oh
+Let it burn
+Let it burn Everybody loves the things you do
+From the way you talk
+To the way you move
+Everybody here is watching you
+'Cause you feel like home
+You're like a dream come true
+But if by chance you're here alone
+Can I have a moment
+Before I go?
+'Cause I've been by myself all night long
+Hoping you're someone I used to know You look like a movie
+You sound like a song
+My God, this reminds me
+Of when we were young Let me photograph you in this light
+In case it is the last time
+That we might be exactly like we were
+Before we realized
+We were sad of getting old
+It made us restless
+It was just like a movie
+It was just like a song I was so scared to face my fears
+Nobody told me that you'd be here
+And I swore you moved overseas
+That's what you said, when you left me You still look like a movie
+You still sound like a song
+My God, this reminds me
+Of when we were young Let me photograph you in this light
+In case it is the last time
+That we might be exactly like we were
+Before we realized
+We were sad of getting old
+It made us restless
+It was just like a movie
+It was just like a song When we were young
+When we were young
+When we were young
+When we were young It's hard to win me back
+Everything just takes me back
+To when you were there
+To when you were there
+And a part of me keeps holding on
+Just in case it hasn't gone
+I guess I still care
+Do you still care? It was just like a movie
+It was just like a song
+My God, this reminds me
+Of when we were young When we were young
+When we were young
+When we were young
+When we were young Let me photograph you in this light
+In case it is the last time
+That we might be exactly like we were
+Before we realized
+We were sad of getting old
+It made us restless
+Oh, I'm so mad I'm getting old
+It makes me reckless
+It was just like a movie
+It was just like a song
+When we were young Whenever I'm alone with you
+You make me feel like I am home again
+Whenever I'm alone with you
+You make me feel like I am whole again Whenever I'm alone with you
+You make me feel like I am young again
+Whenever I'm alone with you
+You make me feel like I am fun again However far away I will always love you
+However long I stay I will always love you
+Whatever words I say I will always love you
+I will always love you Whenever I'm alone with you
+You make me feel like I am free again
+Whenever I'm alone with you
+You make me feel like I am clean again However far away I will always love you
+However long I stay I will always love you
+Whatever words I say I will always love you
+I will always love you However far away I will always love you
+However long I stay I will always love you
+Whatever words I say I will always love you
+I will always love you
+I will always love you
+'Cause I love you When the rain is blowing in your face
+And the whole world is on your case
+I could offer you a warm embrace
+To make you feel my love When the evening shadows and the stars appear
+And there is no one there to dry your tears
+I could hold you for a million years
+To make you feel my love I know you haven't made your mind up yet
+But I would never do you wrong
+I've known it from the moment that we met
+no doubt in my mind were you belong I'd go hungry, I'd go black and blue
+I'd go crawling down the avenue
+No, there's nothing that I wouldn't do
+To make you feel my love The storms are raging on the rolling sea
+And on the highway of regret
+The winds of change are blowing wild and free
+You ain't seen nothing like me yet I could make you happy, make your dreams come true
+Nothing that I wouldn't do
+Go to the ends of the Earth for you
+To make you feel my love To make you feel my love I've made up my mind
+Don't need to think it over
+If I'm wrong I am right
+Don't need to look no further
+This ain't lust
+I know this is love but If I tell the world
+I'll never say enough
+Cause it was not said to you
+And that's exactly what I need to do
+If I'm in love with you Should I give up
+Or should I just keep chasing pavements?
+Even if it leads nowhere
+Or would it be a waste?
+Even If I knew my place should I leave it there?
+Should I give up
+Or should I just keep chasing pavements?
+Even if it leads nowhere I'd build myself up
+And fly around in circles
+Waiting as my heart drops
+And my back begins to tingle
+Finally could this be it or Should I give up
+Or should I just keep chasing pavements?
+Even if it leads nowhere
+Or would it be a waste?
+Even if I knew my place should I leave it there?
+Should I give up
+Or should I just keep chasing pavements?
+Even if it leads nowhere yeah Should I give up
+Or should I just keep chasing pavements?
+Even if, it leads nowhere
+Or would it be a waste?
+Even if I knew my place should I leave it there?
+Should I give up,
+Or should I just keep on chasing pavements?
+Should I just keep on chasing pavements? Or Should I give up
+Or should I just keep chasing pavements?
+Even if it leads nowhere
+Or would it be a waste?
+Even if I knew my place should I leave it there?
+Should I give up
+Or should I just keep chasing pavements?
+Even if it leads nowhere When will I see you again?
+You left with no goodbye, not a single word was said
+No final kiss to seal anything
+I had no idea of the state we were in I know I have a fickle heart and a bitterness
+And a wandering eye, and a heaviness in my head
+But don't you remember, don't you remember?
+The reason you loved me before,
+Baby please remember me once more When was the last time you thought of me?
+Or have you completely erased me from your memories?
+I often think about where I went wrong
+The more I do, the less I know But I know I have a fickle heart and a bitterness
+And a wandering eye, and a heaviness in my head
+But don't you remember, don't you remember?
+The reason you loved me before
+Baby please remember me once more Oh, I gave you the space so you could breathe
+I kept my distance so you would be free
+In hope that you find the missing piece
+To bring you back to me Why don't you remember, don't you remember?
+The reason you loved me before
+Baby please remember me once more
+When will I see you again? She, she ain't real
+She ain't gonna be able to love you like I will
+She is a stranger
+You and I have history
+Or don't you remember
+Sure, she's got it all
+But, baby, is that really what you want Bless your soul, you've got you're head in the clouds
+You made a fool out of you
+And, boy, she's bringing you down
+She made your heart melt
+But you're cold to the core
+Now rumor has it she ain't got your love anymore Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh She is half your age
+But I'm guessing that's the reason that you stayed
+I heard you've been missing me
+You've been telling people things that you shouldn't be
+Like when we creep out and she ain't around
+Haven't you heard the rumors Bless your soul, you've got your head in the clouds
+You made a fool out of me
+And, boy, you're bringing me down
+You made my heart melt, yet I'm cold to the core
+But rumor has it I'm the one you're leaving her for Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh
+Rumor has it, ooh All of these words whispered in my ear
+Tell a story that I cannot bear to hear
+Just 'cause I said it, it don't mean that I meant it
+People say crazy things
+Just 'cause I said it, don't mean that I meant it
+Just 'cause you heard it Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh,
+Rumor has it, ooh But rumor has it he's the one I'm leaving you for You've been on my mind
+I grow fonder every day
+Lose myself in time
+Just thinking of your face
+God only knows why it's taken me
+So long to let my doubts go
+You're the only one that I want I don't know why I'm scared
+I've been here before
+Every feeling, every word
+I've imagined it all
+You'll never know if you never try
+To forget your past and simply be mine I dare you to let me be your, your one and only
+I promise I'm worthy
+To hold in your arms
+So come on and give me the chance
+To prove I am the one who can walk that mile
+Until the end starts If I've been on your mind
+You hang on every word I say
+Lose yourself in time
+At the mention of my name
+Will I ever know how it feels to hold you close
+And have you tell me
+Whichever road I choose, you'll go? I don't know why I'm scared
+'Cause I've been here before
+Every feeling, every word
+I've imagined it all
+You'll never know if you never try
+To forget your past and simply be mine I dare you to let me be your, your one and only
+I promise I'm worthy, mm
+To hold in your arms
+So come on and give me the chance
+To prove I am the one who can walk that mile
+Until the end starts I know it ain't easy giving up your heart
+I know it ain't easy giving up your heart
+Nobody's perfect
+(I know it ain't easy giving up your heart)
+Trust me I've learned it
+Nobody's perfect
+(I know it ain't easy giving up your heart)
+Trust me I've learned it
+Nobody's perfect
+(I know it ain't easy giving up your heart)
+Trust me I've learned it
+Nobody's perfect
+(I know it ain't easy giving up your heart)
+Trust me I've learned it So I dare you to let me be your, your one and only
+I promise I'm worthy
+To hold in your arms
+So come on and give me the chance
+To prove that I am the, one who can walk that mile
+Until the end starts Come on and give me the chance
+To prove that I am the one who can, walk that mile
+Until the end starts If you're not the one for me
+Then I'll come back and bring you to your knees
+If you're not the one for me
+Why do I hate the idea of being free?
+And if I'm not the one for you
+You've gotta stop holding me the way you do
+Oh when you found that the one for you
+Why have we been through what we have been through It's so cold out here in your wilderness
+I want you to be my keeper
+But not if you are so reckless If you're gonna let me down, let me down gently
+Don't pretend that you don't want me
+Our love ain't water under the bridge
+If you're gonna let me down, let me down gently
+Don't pretend that you don't want me
+Our love ain't water under the bridge
+Say that our love ain't water under the bridge What are you waiting for?
+You never seem to make it through the door
+And who are you hiding from?
+It ain't no life to live like you're on the run
+Have I ever asked for much?
+The only thing that I want is your love If you're gonna let me down, let me down gently
+Don't pretend that you don't want me
+Our love ain't water under the bridge
+If you're gonna let me down, let me down gently
+Don't pretend that you don't want me
+Our love ain't water under the bridge
+Say that our love ain't water under the bridge It's so cold in your wilderness
+I want you to be my keeper
+But not if you are so reckless If you're gonna let me down, let me down gently
+Don't pretend that you don't want me
+Our love ain't water under the bridge
+If you're gonna let me down, let me down gently
+Don't pretend that you don't want me
+Our love ain't water under the bridge Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say it ain't so, say it ain't so
+Say that our love ain't water under the bridge I've been walking in the same way as I did
+Missing out the cracks in the pavement
+And turning my heel and strutting my feet
+"Is there anything I can do for you dear?
+Is there anyone I could call?"
+"No and thank you, please Madam.
+I ain't lost, just wandering" Round my hometown
+Memories are fresh
+Round my hometown
+Ooh the people I've met
+Are the wonders of my world
+Are the wonders of my world
+Are the wonders of this world
+Are the wonders of now I like it in the city when the air is so thick and opaque
+I love to see everybody in short skirts, shorts and shades
+I like it in the city when two worlds collide
+You get the people and the government
+Everybody taking different sides Shows that we ain't gonna stand shit
+Shows that we are united
+Shows that we ain't gonna take it
+Shows that we ain't gonna stand shit
+Shows that we are united Round my hometown
+Memories are fresh
+Round my hometown
+Ooh the people I've met yea Are the wonders of my world
+Are the wonders of my world
+Are the wonders of this world
+Are the wonders of my world
+Of my world, yeah
+Of my world
+Of my world, yeah Close enough to start a war
+All that I have is on the floor
+God only knows what we're fighting for
+All that I say, you always say more I can't keep up with your turning tables
+Under your thumb, I can't breathe So I won't let you close enough to hurt me
+No, I won't ask you, you to just desert me
+I can't give you what you think you gave me
+It's time to say goodbye to turning tables, to turning tables Under haunted skies I see
+Where love is lost, your ghost is found
+I've braved a hundred storms to leave you
+As hard as you try, no, I will never be knocked down I can't keep up with your turning tables
+Under your thumb, I can't breathe So I won't let you close enough to hurt me, no
+I won't ask you, you to just desert me
+I can't give you what you think you gave me
+It's time to say goodbye to turning tables, turning tables Next time I'll be braver, I'll be my own savior
+When the thunder calls to me
+Next time I'll be braver, I'll be my own savior
+Standing on my own two feet I won't let you close enough to hurt me, no
+I won't ask you, you to just desert me
+I can't give you what you think you gave me
+It's time to say goodbye to turning tables, to turning tables
+Turning tables, yeah, turning This is the end
+Hold your breath and count to ten
+Feel the earth move and then
+Hear my heart burst again For this is the end
+I've drowned and dreamt this moment
+So overdue I owe them
+Swept away, I'm stolen Let the sky fall
+When it crumbles
+We will stand tall
+Face it all together Let the sky fall
+When it crumbles
+We will stand tall
+Face it all together
+At skyfall
+At skyfall Skyfall is where we start
+A thousand miles and poles apart
+Where worlds collide and days are dark
+You may have my number, you can take my name
+But you'll never have my heart Let the sky fall
+When it crumbles
+We will stand tall
+Face it all together Let the sky fall
+When it crumbles
+We will stand tall
+Face it all together
+At skyfall Where you go I go
+What you see I see
+I know I'd never be me
+Without the security
+Of your loving arms
+Keeping me from harm
+Put your hand in my hand
+And we'll stand Let the sky fall
+When it crumbles
+We will stand tall
+Face it all together Let the sky fall
+When it crumbles
+We will stand tall
+Face it all together
+At skyfall Let the sky fall
+We will stand tall
+At skyfall Just the guitar This was all you, none of it me
+You put your hands all over my body and told me, umm
+You told me you were ready
+For the big one, for the big jump
+I'd be your last love everlasting you and me
+That was what you told me I'm giving you up
+I've forgiven it all
+You set me free, oh Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more
+Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more I was too strong you were trembling
+You couldn't handle the hot heat rising (rising), umm
+Baby I'm so rising
+I was running, you were walking
+You couldn't keep up, you were falling down (down), umm
+There's only one way down I'm giving you up
+I've forgiven it all
+You set me free, oh Send my love to your new lover
+Treat her better
+We gotta let go of all of our ghosts
+We've both know we ain't kids no more
+Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more If you're ready, if you're ready
+If you're ready, I am ready
+If you're ready, if you're ready
+We both know we ain't kids no more
+No, we ain't kids no more I'm giving you up
+I've forgiven it all
+You set me free Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more
+Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more If you're ready, if you're ready (Send my love to your new lover)
+If you're ready, are you ready? (Treat her better)
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more
+If you're ready, if you're ready (Send my love to your new lover)
+If you're ready, are you ready? (Treat her better)
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more Just the guitar This was all you, none of it me
+You put your hands all over my body and told me, umm
+You told me you were ready
+For the big one, for the big jump
+I'd be your last love everlasting you and me
+That was what you told me I'm giving you up
+I've forgiven it all
+You set me free, oh Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more
+Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more I was too strong you were trembling
+You couldn't handle the hot heat rising (rising), umm
+Baby I'm so rising
+I was running, you were walking
+You couldn't keep up, you were falling down (down), umm
+There's only one way down I'm giving you up
+I've forgiven it all
+You set me free, oh Send my love to your new lover
+Treat her better
+We gotta let go of all of our ghosts
+We've both know we ain't kids no more
+Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more If you're ready, if you're ready
+If you're ready, I am ready
+If you're ready, if you're ready
+We both know we ain't kids no more
+No, we ain't kids no more I'm giving you up
+I've forgiven it all
+You set me free Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more
+Send my love to your new lover
+Treat her better
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more If you're ready, if you're ready (Send my love to your new lover)
+If you're ready, are you ready? (Treat her better)
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more
+If you're ready, if you're ready (Send my love to your new lover)
+If you're ready, are you ready? (Treat her better)
+We've gotta let go of all of our ghosts
+We both know we ain't kids no more I only wanted to have fun
+Learning to fly, learning to run
+I let my heart decide the way
+When I was young
+Deep down I must have always known
+That this would be inevitable
+To earn my stripes I'd have to pay
+And bear my soul I know I'm not the only one
+Who regrets the things they've done
+Sometimes I just feel it's only me
+Who can't stand the reflection that they see
+I wish I could live a little more
+Look up to the sky, not just the floor
+I feel like my life is flashing by
+And all I can do is watch and cry
+I miss the air, I miss my friends
+I miss my mother, I miss it when
+Life was a party to be thrown
+But that was a million years ago When I walk around all of the streets
+Where I grew up and found my feet
+They can't look me in the eye
+It's like they're scared of me
+I try to think of things to say
+Like a joke or a memory
+But they don't recognize me now
+In the light of day I know I'm not the only one
+Who regrets the things they've done
+Sometimes I just feel it's only me
+Who never became who they thought they'd be
+I wish I could live a little more
+Look up to the sky, not just the floor
+I feel like my life is flashing by
+And all I can do is watch and cry
+I miss the air, I miss my friends
+I miss my mother, I miss it when
+Life was a party to be thrown
+But that was a million years ago
+A million years ago Looking for some education
+Made my way into the night
+All that bullshit conversation
+Baby, can't you read the signs? I won't bore you with the details, baby
+I don't even wanna waste your time
+Let's just say that maybe
+You could help me ease my mind
+I ain't Mr. Right But if you're looking for fast love
+If that's love in your eyes
+It's more than enough
+Had some bad love
+So fast love is all that I've got on my mind Ooh, ooh
+Ooh, ooh Looking for some affirmation
+Made my way into the sun
+My friends got their ladies
+And they're all having babies
+I just wanna have some fun I won't bore you with the details, baby
+I don't even wanna waste your time
+Let's just say that maybe
+You could help me ease my mind
+I ain't Mr. Right But if you're looking for fast love
+If that's love in your eyes
+It's more than enough
+I've had some bad love
+So fast love is all that I've got on my mind Ooh, ooh
+Baby, baby
+Ooh, ooh
+Baby, baby
+Ooh, ooh
+Baby, baby
+Ooh In the absence of security
+I made my way into the night
+Stupid cupid keeps on calling me
+And I see nothing in his eyes
+I miss my baby
+Oh I, I miss my baby
+I miss my baby
+I miss, I miss, I miss, I miss my baby
+Ooh I, I miss my baby Take your eyes off of me so I can leave
+I'm far too ashamed to do it with you watching me
+This is never ending, we have been here before
+But I can't stay this time 'cause I don't love you anymore
+Please stay where you are
+Don't come any closer
+Don't try to change my mind
+I'm being cruel to be kind I can't love you in the dark
+It feels like we're oceans apart
+There is so much space between us
+Maybe we're already defeated
+Ah-yeah-yeah-yeah-yeah-yeah-yeah everything changed me You have given me something that I can't live without
+You mustn't underestimate that when you are in doubt
+But I don't want to carry on like everything is fine
+The longer we ignore it all the more that we will fight
+Please don't fall apart
+I can't face your breaking heart
+I'm trying to be brave
+Stop asking me to stay I can't love you in the dark
+It feels like we're oceans apart
+There is so much space between us
+Maybe we're already defeated
+Ah-yeah-yeah-yeah-yeah-yeah-yeah everything changed me We're not the only ones
+I don't regret a thing
+Every word I've said
+You know I'll always mean
+It is the world to me
+That you are in my life
+But I want to live
+And not just survive That's why I can't love you in the dark
+It feels like we're oceans apart
+There is so much space between us
+Maybe we're already defeated
+'Cause ah-yeah-yeah-yeah-yeah-yeah-yeah everything changed me
+And I-I-I-I-I don't think you can save me I want every single piece of you
+I want your heaven and your ocean's too
+Treat me soft but touch me cool
+I wanna teach you things you never knew, baby
+Bring the floor up to my knees
+Let me fall into your gravity
+And kiss me back to life to see
+Your body standing over me Baby don't let the lights go down
+Baby don't let the lights go down
+Baby don't let the lights go down
+Lights go down, lights go down
+Lights go down, lights go down
+Down, down, down, down I miss you when the lights go out
+It illuminates all of my doubts
+Pull me in, hold me tight
+Don't let go, baby give me light
+I miss you when the lights go out
+It illuminates all of my doubts
+Pull me in, hold me tight
+Don't let go, baby give me light I love the way your body moves
+Towards me from across the room
+Brushing past my every groove
+No one has me like you do
+In your heart I bring my soul
+But be delicate with my ego
+I wanna step into your great unknown
+With you and me setting the tone Baby don't let the lights go down
+Baby don't let the lights go down
+Baby don't let the lights go down
+Lights go down, lights go down
+Lights go down, lights go down
+Down, down, down, down I miss you when the lights go out
+It illuminates all of my doubts
+Pull me in, hold me tight
+Don't let go, baby give me light
+I miss you when the lights go out
+It illuminates all of my doubts
+Pull me in, hold me tight
+Don't let go, baby give me light We play so dirty in the dark
+'Cause we are living worlds apart
+It only makes it harder baby
+It only makes it harder baby (harder baby)
+Harder baby (harder baby), harder baby I miss you when the lights go out
+It illuminates all of my doubts
+Pull me in, hold me tight
+Don't let go, baby give me light
+I miss you when the lights go out
+It illuminates all of my doubts
+Pull me in, hold me tight
+Don't let go, baby give me light I miss you, I miss you
+I miss you, I miss you
+I miss you, I miss you
+I miss you, I miss you I remember all of the things that I thought I wanted to be
+So desperate to find a way out of my world and finally breathe
+Right before my eyes I saw, my heart it came to life
+This ain't easy it's not meant to be
+Every story has its scars When the pain cuts you deep
+When the night keeps you from sleeping
+Just look and you will see
+That I will be your remedy
+When the world seems so cruel
+And your heart makes you feel like a fool
+I promise you will see
+That I will be, I will be your remedy No river is too wide or too deep for me to swim to you
+Come whenever I'll be the shelter that won't let the rain come through
+Your love, it is my truth
+And I will always love you
+Love you When the pain cuts you deep
+When the night keeps you from sleeping
+Just look and you will see
+That I will be your remedy
+When the world seems so cruel
+And your heart makes you feel like a fool
+I promise you will see
+That I will be, I will be your remedy, oh When the pain cuts you deep
+When the night keeps you from sleeping
+Just look and you will see
+I will be, I will be
+When the world seems so cruel
+And your heart makes you feel like a fool
+I promise you will see
+That I will be, I will be, I will be
+Your remedy, oh Didn't I give it all?
+Tried my best
+Gave you everything I had, everything and no less
+Didn't I do it right? Did I let you down?
+Maybe you got too used to having me 'round
+Still how can you walk away
+From all my tears
+It's gonna be an empty road without me right here
+But go on and take it, take it all with you
+Don't look back at this crumbling fool
+Just take it all with my love, take it all with my love Maybe I should leave, to help you see
+Nothing is better than this and this is everything we need
+So is it over? Is this really it, you're giving up so easily
+I thought you loved me more than this But go on, go on, take it, take it all with you
+Don't look back at this crumbling fool
+Just take it all with my love, take it all with my love I will change if I must
+Slow it down and bring it home, I will adjust
+Oh if only, if only you knew
+Everything I do, is for you But go on and take it, take it all with you
+Don't look back at this crumbling fool
+Just take it, take it all with you
+Don't look back at this crumbling fool
+Just take it all, with my love
+Take it all with my love
+Take it all with my love This is how the story went
+I met someone by accident
+It blew me away
+Blew me away It was in the darkest of my days
+When you took my sorrow and you took my pain
+And buried them away, you buried them away I wish I could lay down beside you
+When the day is done
+And wake up to your face against the morning sun
+But like everything I've ever known
+You disappear one day
+So I spend my whole life hiding my heart away Dropped you off at the train station
+Put a kiss on top of your head
+Watch you wave
+And watched you wave Then I went on home to my skyscrapers
+And neon lights and waiting papers
+That I call home
+I call that home I wish I could lay down beside you
+When the day is done
+And wake up to your face against the morning sun
+But like everything I've ever known
+You disappear one day
+So I spend my whole life hiding my heart away, away Woke up feeling heavy-hearted
+I'm going back to where I started
+The morning rain, the morning rain
+And though I wish that you were here
+On that same old road that brought me here
+It's calling me home, It's calling me home I wish I could lay down beside you
+When the day is done
+And wake up to your face against the morning sun
+But like everything I've ever known
+You disappear one day
+So I spend my whole life hiding my heart away
+I can't spend my whole life hiding my heart away I don't want you to be no slave
+I don't want you to work all day
+But I want you to be true
+And I just want to make love to you
+Love to you, ooh baby
+Love to you, yeah All I want to do is wash your clothes
+I don't want to keep you indoors
+There is nothing you can't do
+But keep me making love to me
+Love to me, ooh baby
+Love to you, yeah And I can tell by the way you walk that walk
+And I can hear by the way you talk that talk
+And I can know by the way you treat your girl
+That I can give you all the loving in the whole wide world All I want you to do is make your bread
+Just to make sure you're well fed
+I don't want you sad and blue
+And I just want to make love to you
+Love to you, ooh yeah
+Love to you, yeah And I can tell by the way you walk that walk
+And I can hear by the way you talk that talk
+And I can know by the way you treat your girl
+That I can give you all the loving in the whole wide world All I want you to do baby is make your bread
+Just to make sure you're well fed
+I don't want you sad and blue
+And I just want to make love to you
+Love to you, ooh yeah
+Love to you, yeah
+Oh I just want to make love to you Happy New Year! Turn down the lights
+Turn down the bed
+Turn down these voices
+Inside my head Lay down with me
+And tell me no lies
+Just hold me closly
+Don't patronize Don't patronize me 'Cause I can't make you love me
+If you don't
+You can't make your heart feel
+Something that it won't
+And even in the dark
+These final hours
+I will lay down my heart
+I will feel the power
+But you won't
+No, you won't
+'Cause I can't make you love me
+When you don't
+When you don't, yeah I'll close my eyes
+'Cause then I don't see
+The love you don't feel
+When you're holding me Morning will come
+And I'll do what's right
+Just give me till then
+To give up this fight And I will give up this fight 'Cause I can't make you love me
+If you don't
+You can't make your heart feel
+Something that it won't
+And even in the dark
+These final hours
+I will lay down my heart
+I will feel the power
+But you won't
+No, you won't
+'Cause I can't make you love me
+When you don't
+When you don't, ooh don't
+You, when you don't, yeah, yeah Hold me closer, one more time
+Say that you love me in your last goodbye
+Please forgive me, for my sins
+Yes, I swam dirty waters
+But you pushed me in
+I've seen your face, under every sky
+Over every border and on every line
+You know my heart, more than I do
+We were the greatest, me and you But we had time against us
+And miles between us
+The heavens cried
+I know I left you speechless
+But now the sky has cleared and it's blue
+And I see my future in you I'll be waiting for you when you're ready to love me again
+I'll put my hands up
+I'll do everything different
+I'll be better to you,
+I'll be waiting for you when you're ready to love me again
+I'll put my hands up
+I'll be somebody different
+I'll be better to you Let me stay here for just one more night
+Build your world around me
+And pull me to the light
+So I can tell you that I was wrong
+I was a child then, but now I'm willing to learn But we had time against us
+And miles between us
+The heavens cried
+I know I left you speechless
+But now the sky has cleared and it's blue
+And I see my future in you I'll be waiting for you when you're ready to love me again
+I'll put my hands up
+I'll do everything different
+I'll be better to you
+I'll be waiting for you when you're ready to love me again
+I'll put my hands up
+I'll be somebody different
+I'll be better to you Time against us
+Miles between us
+Heavens cried
+I know I left you speechless
+Time against us
+Miles between us
+Heavens cried
+I know I left you speechless
+I know I left you speechless I'll be waiting
+I'll be waiting for you when you're ready to love me again
+I'll put my hands up
+I'll do everything different
+I'll be better to you
+I'll be waiting for you when you're ready to love me again
+I'll put my hands up
+I'll be somebody different
+I'll be better for you This is the end
+Hold your breath and count to ten
+Feel the Earth move, and then
+Hear my heart burst again For this is the end
+I've drowned and dreamt this moment
+So overdue, I owe them
+Swept away, I'm stolen Let the sky fall, when it crumbles
+We will stand tall
+And face it all together
+Let the sky fall, when it crumbles
+We will stand tall
+And face it all together
+At sky fall
+at sky fall Skyfall is where we start
+A thousand miles and poles apart
+Where worlds collide and days are dark
+You may have my number
+You can take my name
+But you'll never have my heart Let the sky fall, when it crumbles
+We will stand tall
+And face it all together
+Let the sky fall, when it crumbles
+We will stand tall
+And face it all together
+At sky fall Let the sky fall, when it crumbles
+We will stand tall
+Let the sky fall, when it crumbles
+We will stand tall Where you go I go
+What you see I see
+I know I'd never be me with out the security
+Of your loving arms keeping me from harm
+Put your hand in my hand
+And we'll stand.... Let the sky fall, when it crumbles
+We will stand tall
+And face it all together
+Let the sky fall, when it crumbles
+We will stand tall
+And face it all together
+At sky fall Let the sky fall
+We will stand tall
+At skyfall (Verse 1)
+There's a fire starting in my heart
+Reaching a fever pitch and it's bringing me out the dark
+Finally I can see you crystal clear
+Go head and sell me out and I'll lay your ship bare
+See how I'll leave with every piece of you
+Don't underestimate the things that I will do
+There's a fire starting in my heart
+Reaching a fever pitch and it's bringing me out the dark Chorus 1
+The scars of your love remind me of us
+They keep me thinkin' that we almost had it all
+The scars of your love, they leave me breathless
+I can't help feeling, we could've had it all... (You're gonna wish you never met me)
+Rolling in the deep... (Tears are gonna fall rollin' in the deep)
+You had my heart inside of your hand (You're gonna wish you never met me)
+And you played it to the beat (Tears are gonna fall rollin' in the deep) Verse 2
+Baby I have no story to be told
+But I've heard one on you and I'm gonna make your head burn
+Think of me in the depths of your despair
+Making a home down there, as mine sure won't be shared (Chorus 2)
+The scars of your love remind me of us
+They keep me thinkin' that we almost had it all
+The scars of your love, they leave me breathless
+I can't help feeling, we could've had it all
+Rolling in the deep... you had my heart inside of your hand
+And you played it to the beat
+Could've had it all... Rollin' in the deep
+You had my heart inside of your hand
+But you played it with a beating (Verse 3)
+Throw your stone through every open door
+Count your blessings to find what you look for
+Turn my sorrow into treasured gold
+You pay me back in kind and reap just what you sow (Chorus 3)
+We could've had it all... We could've had it all...
+It all, It all, It all... We could've had it all...
+Rollin' in the deep...
+You had my heart inside of your hand
+And you played it to the beat
+Could've had it all
+Rollin' in the deep
+You had my heart inside of your hand
+But you played it, you played it, you played it, you played it to the beat Some say, I'll be better without you,
+They don't know you like I do,
+Or at least as far as I thought I knew
+I can't bear this time,
+It drags, as I lose my mind
+Reminded by things I find
+I know some clothes you left behind.
+Wake me up, wake me up when all is done
+I won't rise until this battle's won
+My dignity is become undone But I won't go
+I can't do it on my own
+If this ain't love, then what is?
+I'm willing to take the risk
+I won't go, I can't do it on my own,
+If this is ain't love, then what is?
+I'm willing to take the risk So petrified, I'm so scared to step into this right,
+What if I lose my heart and fail the ?
+I won't forgive me if I gave up trying
+I heard his voice today
+I didn't know a single word he said
+Now I'm resemblance to the man I met
+Just a vague and broken boy instead But I won't go, I can't do it on my own
+If this ain't love, then what is?
+I'm willing to take the risk
+I won't go, I can't do it on my own
+If this ain't love, then what is?
+I'm willing to take the risk There will be times, we'll try and give it up
+Bursting at the seams, no doubt
+We almost fall apart and burn up easy
+So watch them turn to dust
+But nothing will never taint us I won't go, I can't do it on my own
+If this ain't love, then what is?
+I'm willing to take the risk
+I won't go, I can't do it on my own
+If this ain't love, then what is?
+I'm willing to take the risk Will he, will he still remember me?
+Will he still love me even when he's free
+Or will he go back to the place where
+He will choose the poison over me?
+When we spoke yesterday
+He said to hold my breath, to sit and wait
+I'll be home soon, I won't be late He won't go
+He can't do it on his own
+If this ain't love, then what is?
+He's willing to take the risk
+So I won't go, I can't do it on his own,
+If this ain't love, then what is?
+I'm willing to take the risk 'Cause he won't go
+He can't do it on his own
+If this ain't love, then what is?
+We're willing to take the risk
+I won't go! I can't do it on my own
+If this ain't love, then what is?
+I'm willing to take the risk I let it fall, my heart,
+And as it fell you rose to claim it
+It was dark and I was over
+Until you kissed my lips and you saved me My hands, they're strong
+But my knees were far too weak
+To stand in your arms
+Without falling to your feet But there's a side to you
+That I never knew, never knew
+All the things you'd say
+They were never true, never true
+And the games you play
+You would always win, always win But I set fire to the rain
+Watched it pour as I touched your face
+Well, it burned while I cried
+'Cause I heard it screaming Out your name,
+Your name When I lay with you
+I could stay there
+Close my eyes
+Feel you here forever
+You and me together nothing gets better 'Cause there's a side to you
+That I never knew, never knew
+All the things you'd say
+They were never true, never true
+And the games you play
+You would always win, always win But I set fire to the rain
+Watched it pour as I touched your face
+Well, it burned while I cried
+'Cause I heard it screaming out your name,
+Your name I set fire to the rain
+And I threw us into the flames
+Well, it felt something died
+'Cause I knew that that was
+The last time, the last time Sometimes I wake up by the door,
+That heart you caught must be waiting for you
+Even now when we're already over
+I can't help myself from looking for you I set fire to the rain
+Watched it pour as I touched your face
+Well, it burned while I cried
+'Cause I heard it screaming Out your name,
+Your name I set fire to the rain,
+And I threw us into the flames
+Well, it felt something died
+'Cause I knew that, that was the last time
+The last time Let it burn
+Let it burn
+Let it burn Daydreamer
+Sitting on the sea
+Soaking up the sun
+He is a real lover
+And making up the past
+Feeling up his girl
+Like he's never felt a figure before A jaw dropper
+Looks good when he walks
+Is the subject of their talk
+He would be hard to chase
+But good to catch
+And he could change the world
+With his hands behind his back, oh You can find him sittin' on your doorstep
+Waiting for a surprise
+And he will feel like he's been there for hours
+And you can tell that he'll be there for life Daydreamer
+With eyes that make you melt
+He lends his coat for shelter
+Plus he's there for you
+When he shouldn't be
+But he stays all the same
+Waits for you
+Then sees you through There's no way I
+Could describe him
+What I'll say is
+Just what I'm hoping for But I will find him sittin' on my doorstep
+Waiting for a surprise
+And he will feel like he's been there for hours
+And I can tell that he'll be there for life
+And I can tell that he'll be there for life With your loving, there ain't nothing
+That I can't adore
+The way I'm running, with you, honey
+Is we can break every low
+I find it funny that you're the only
+One I never looked for
+There is something in your loving
+That tears down my walls I wasn't ready then, I'm ready now
+I'm heading straight for you
+You will only be eternally
+The one that I belong to The sweetest devotion
+Hitting me like an explosion
+All of my life, I've been frozen
+The sweetest devotion I've known I'll forever be whatever you want me to be
+I'll go under and all over for your clarity
+When you wonder if I'm gonna lose my way home
+Just remember, that come whatever, I'll be yours all alone I wasn't ready then, I'm ready now
+I'm heading straight for you
+You will only be eternally
+The one that I belong to The sweetest devotion
+Hitting me like an explosion
+All of my life, I've been frozen
+The sweetest devotion I've known I've been looking for you, baby
+In every face that I've ever known
+And there is something 'bout the way you love me
+That finally feels like home
+All my life, you're my darkness
+You're the right kind of madness
+And you're my hope, you're my despair
+You're my scope, everything, everywhere The sweetest devotion
+Hitting me like an explosion
+All of my life, I've been frozen
+The sweetest devotion I've known Sweetest
+It's the sweetest
+Sweetest
+It's the sweetest
+Sweetest
+It's the sweetest
+Sweetest
+It's the sweetest
+Devotion [Verse 1]
+When did it go wrong, I will never know
+I have loved you all my life
+How did it slow down, I go round and round
+Thinking about it all the time [Pre-Chorus]
+I gave you heaven on a platter baby
+I gave you everything you never gave me
+I never lied and I never faked it
+Only wanted for you to save me
+This love, it ain't over yet
+There's too much that I haven't said [Chorus]
+Did you find the note that I wrote?
+I hid it in the seam of your coat
+It was hard to write, had a lump in my throat
+Do you even know that I can't let go [Verse 2]
+Why were you so cold, let the truth be told
+Tell me was it all for the thrill?
+What was I thinking, I gave you everything
+But you still went for the kill [Pre-Chorus]
+I gave you heaven on a platter baby
+I gave you everything you never gave me
+I never lied and I never faked it
+Only wanted for you to save me [Chorus]
+Did you find the note that I wrote?
+I hid it in the seam of your coat
+It was hard to write, had a lump in my throat
+Do you even know that I can't let go [Bridge]
+Oooh sometimes I feel like I'm in the dark
+Oooh I thought I'd die in your arms [Chorus]
+Did you find the note that I wrote?
+I hid it in the seam of your coat
+It was hard to write, I had a lump in my throat
+Do you even know that I can't let go [Outro]
+Hope you know, I won't let go I thought I told you, he'd be home soon
+Couldn't help myself, you're too good to be true.
+I fall short each time,
+Every time he ain't here
+You and your charm creep closer
+Closer and near
+Like a fool for fire, I fall, with my pride and all.
+Like a bomb before explosion,
+Ticking by your call,
+You're the wiser one, disguised from greed,
+And I'm just a child who belongs on her knees. But I found a boy who I love more,
+Than I ever did you before,
+So stand beside the river I cried,
+And lay yourself down.
+Look how you want me now that I don't need you. So, you thought that I'd crumble to my knees
+At the first sight of you crawling back to me
+To whisper "will you leave your man? "
+Cause you swear that this time you can stand by me.
+I won't stand by you. Cause I found a boy who I love more,
+Than I ever did you before,
+So stand beside the river I cried
+And lay yourself down.
+Look how you want me now that I don't need you! I ain't yours for no taking,
+You must be mistaken
+I could never look into your eyes, and settle for wrong
+And ignore the right When I found a boy who loves me more,
+Than you ever did me before.
+So stand beside the river you cried
+And lay yourself down!
+Look how you want me now that I don't need you! Found myself today singing out your name,
+You said I'm crazy,
+If I am I'm crazy for you. Sometimes sitting in the dark wishing you were here
+Turns me crazy,
+But it's you who makes me lose my head. And every time I'm meant to be acting sensible
+You drift into my head
+And turn me into a crumbling fool. Tell me to run and I'll race,
+If you want me to stop I'll freeze,
+And if you want me gone. I'll leave, just hold me closer baby,
+And make me crazy for you.
+Crazy for you. Lately with this state I'm in I can't help myself but spin.
+I wish you'd come over,
+Send me spinning closer to you. My oh my, how my blood boils, it's sweet taste for you,
+Strips me down bare
+And gets me into my favorite mood. I keep on trying, fighting these feelings away,
+But the more I do,
+The crazier I turn into. Pacing floors and opening doors,
+Hoping you'll walk through
+And save me boy,
+Because I'm too crazy for you.
+Crazy for you Everybody tells me it's 'bout time that I moved on
+And I need to learn to lighten up and learn how to be young
+But my heart is a valley, it's so shallow and man made
+I'm scared to death if I let you in that you'll see I'm just a fake
+Sometimes I feel lonely in the arms of your touch
+But I know that's just me, 'cause nothing ever is enough
+When I was a child I grew up by the River Lea
+There was something in the water, now that something's in me
+Oh I can't go back, but the reeds are growing out of my fingertips
+I can't go back to the river But it's in my roots, it's in my veins
+It's in my blood and I stain every heart that I use to heal the pain But it's in my roots, it's in my veins
+It's in my blood and I stain every heart that I use to heal the pain
+So I blame it on the River Lea, the River Lea, the River Lea
+Yeah, I blame it on the River Lea, the River Lea, the River Lea I should probably tell you now before it's way too late
+That I never meant to hurt you or lie straight to your face
+Consider this my apology, I know it's years in advance
+But I'd rather say it now in case I never get the chance
+No, I can't go back, but the reeds are growing out of my fingertips
+I can't go back to the river But it's in my roots, it's in my veins
+It's in my blood and I stain every heart that I use to heal the pain It's in my roots, it's in my veins
+It's in my blood and I stain every heart that I use to heal the pain So I blame it on the River Lea, the River Lea, the River Lea
+Yeah I blame it on the River Lea, the River Lea, the River Lea So I blame it on the River Lea, the River Lea, the River Lea
+Yeah, I blame it on the River Lea, the River Lea, the River Lea I never woulda hitch-hiked to Birmingham
+If it hadn't been for love
+I never woulda caught the train to Louisiana
+If it hadn't been for love
+I never woulda run through the blindin' rain
+Without one dollar to my name
+If it hadn't been, if it hadn't been for love I never woulda seen the trouble that I'm in
+If it hadn't been for love
+Woulda been gone like a wayward wind
+If it hadn't been for love
+Nobody knows it better than me
+I wouldn't be wishing I was free
+If it hadn't been, if it hadn't been for love Four cold walls against my will
+At least I know he's lying still
+Four cold walls without parole
+Lord have mercy on my soul Four cold walls against my will
+At least I know he's lying still
+Four cold walls without parole
+Lord have mercy on my soul I never woulda hitch-hiked to Birmingham
+If it hadn't been for love
+I never woulda caught the train to Louisiana
+If it hadn't been for love
+I never woulda loaded up a forty-four
+Put myself behind a jailhouse door
+If it hadn't been, if it hadn't been for love
+If it hadn't been, if it hadn't been for love, yes
+If it hadn't been, if it hadn't been for love, yes Hold my hand while you cut me down
+It had only just begun but now it's over now
+And you're in the heat of moments with your heart playing up cold
+I'm between the middle watching hastiness unfold
+On my eyes you were smiling in the spotlight dancing with the night
+The night
+When I fell off your mind I'm tired of trying
+Your teasing ain't enough
+Fed up of biding your time
+When I don't get nothing back
+And for what, and for what, and for what
+When I don't get nothing back
+Oy, I'm tired Where'd you go when you stayed behind
+I looked up and inside down and outside only to find
+A double taking punching hard and laughing at my smile
+I get closer you obviously prefer her I'm tired of trying
+Your teasing ain't enough
+Fed up of biding your time
+When I don't get nothing back
+And for what, and for what, and for what
+When I don't get nothing back
+Boy I'm tired of trying
+Your teasing ain't enough
+Fed up of biding your time
+When I don't get nothing back
+And for what, and for what, and for what
+When I don't get nothing back
+Oy, I'm tired (I should have known) Never mind said your open arms
+I couldn't help believe they tricked me back into them, even though I'm tired of trying
+Your teasing ain't enough
+Fed up of biding your time
+When I don't get nothing back
+And for what, and for what, and for what
+When I don't get nothing back
+Boy I'm tired of trying
+Your teasing ain't enough
+Fed up of biding your time
+When I don't get nothing back
+And for what, and for what, and for what
+When I don't get nothing back
+Oy, I'm tired Who wants to be right as rain
+It's better when something is wrong
+You get excitement in your bones
+And everything you do's a game
+When night comes and you're on your own
+You can say I chose to be alone
+Who wants to be right as rain
+It's harder when you're on top 'Cause when hard work don't pay off
+And I'm tired there ain't no room in my bed
+As far as I'm concerned
+So wipe that dirty smile off
+We won't be making up
+I've cried my heart out
+And now I've had enough of love Who wants to be riding high
+When you'll just crumble back on down
+You give up everything you are
+And even then you don't get far
+They make believe that everything
+Is exactly what it seems
+But at least when you're at your worst
+You know how to feel things 'Cause when hard work don't pay off
+And I'm tired there ain't no room in my bed
+As far as I'm concerned
+So wipe that dirty smile off
+We won't be making up
+I've cried my heart out
+And now I've had enough of love Go ahead and still my heart
+To make me cry again
+'Cause it will never hurt
+As much as it did then
+We were both right
+And no one had blame
+But now I give up
+On this endless game 'Cause who wants to be right as rain
+It's better when something is wrong
+I get excitement in my bones
+Even though everything's a strain
+When night comes and I'm on my own
+You should know I chose to be alone
+Who wants to be right as rain
+It's harder when you're on top 'Cause when hard work don't pay off
+And I'm tired there ain't no room in my bed
+As far as I'm concerned
+So wipe that dirty smile off
+We won't be making up
+I've cried my heart out
+And now I've had enough of love No room in my bed
+As far as I'm concerned
+So wipe that dirty smile off
+We won't be making up
+I've cried my heart out
+And now I've had enough of love So little to say but so much time
+Despite my empty mouth the words are in my mind
+Please wear the face, the one where you smile
+Because you lighten up my heart when I start to cry Forgive me first love, but I'm tired
+I need to get away to feel again
+Try to understand why, don't get so close to change my mind
+Please wipe that look out of your eyes, it's bribing me to doubt myself
+Simply, it's tiring This love has dried up and stayed behind
+And if I stay I'll be alive
+Then choke on words I'd always hide
+Excuse me first love, but we're through
+I need to taste the kiss from someone new Forgive me first love, but I'm too tired
+I'm bored to say the least and I, I lack desire
+Forgive me first love, forgive me first love, forgive me first love
+Forgive me first love forgive me, forgive me first love, forgive me first love This is the end
+Hold your breath and count to ten
+Feel the earth move and then
+Hear my heart burst again For this is the end
+I've drowned and dreamt this moment
+So overdue I owe them
+Swept away, I'm stolen Let the skyfall
+When it crumbles
+We will stand tall
+Face it all together Let the skyfall
+When it crumbles
+We will stand tall
+Face it all together
+At skyfall
+At skyfall Skyfall is where we start
+A thousand miles and poles apart
+Where worlds collide and days are dark
+You may have my number, you can take my name
+But you'll never have my heart Let the skyfall (let the sky fall)
+When it crumbles (when it crumbles)
+We will stand tall (we will stand tall)
+Face it all together Let the skyfall (let the sky fall)
+When it crumbles (when it crumbles)
+We will stand tall (we will stand tall)
+Face it all together
+At skyfall [x2:]
+(Let the sky fall
+When it crumbles
+We will stand tall) Where you go I go
+What you see I see
+I know I'd never be me
+Without the security
+Of your loving arms
+Keeping me from harm
+Put your hand in my hand
+And we'll stand Let the skyfall (let the sky fall)
+When it crumbles (when it crumbles)
+We will stand tall (we will stand tall)
+Face it all together Let the skyfall (let the sky fall)
+When it crumbles (when it crumbles)
+We will stand tall (we will stand tall)
+Face it all together
+At skyfall Let the sky fall
+We will stand tall
+At skyfall This is how the story went
+I met someone by accident
+It blew me away
+Blew me away It was in the darkest of my days
+When you took my sorrow and you took my pain
+And buried them away, you buried them away I wish I could lay down beside you
+When the day is done
+And wake up to your face against the morning sun
+But like everything I've ever known
+You disappear one day
+So I spend my whole life hiding my heart away Dropped you off at the train station
+Put a kiss on top of your head
+Watch you wave
+And watched you wave Then I went on home to my skyscrapers
+And neon lights and waiting papers
+That I call home
+I call that home I wish I could lay down beside you
+When the day is done
+And wake up to your face against the morning sun
+But like everything I've ever known
+You disappear one day
+So I spend my whole life hiding my heart away, away Woke up feeling heavy-hearted
+I'm going back to where I started
+The morning rain, the morning rain
+And though I wish that you were here
+On that same old road that brought me here
+It's calling me home, It's calling me home I wish I could lay down beside you
+When the day is done
+And wake up to your face against the morning sun
+But like everything I've ever known
+You disappear one day
+So I spend my whole life hiding my heart away
+I can't spend my whole life hiding my heart away Right under my feet there's air made of bricks
+Pulls me down turns me weak for you
+I find myself repeating like a broken tune
+And I'm forever excusing your intentions
+That I give in to my pretendings
+Which forgive you each time
+Without me knowing
+They melt my heart to stone And I hear your words that I made up
+You say my name like there could be an us
+I best tidy up my head I'm the only one in love
+I'm the only one in love Each and every time I turn around to leave
+I feel my heart begin to burst and bleed
+So desperately I try to link it with my head
+But instead I fall back to my knees
+As you tear your way right through me
+I forgive you once again
+Without me knowing
+You've burnt my heart to stone And I hear your words that I made up
+You say my name like there could be an us
+I best tidy up my head I'm the only one in love
+I'm the only one in love Why do you steal my hand
+Whenever I'm standing my own ground
+You build me up, then leave me dead I hear your words you made up
+I say your name like there should be an us
+I best tidy up my head I'm the only one, in love
+I'm the only one in love Fool that I am for falling in love with you
+And fool that I am for thinking you loved me too You took my heart then played the part of little coquette
+And my dreams just disappeared like the smoke from a cigarette Fool that I am for hoping you'd understand
+And thinking you would listen to all of the things
+The things I had planned But we couldn't see eye to eye
+So darling
+Darling
+Darling this is goodbye Oh
+I still care
+Fool that I am
+Ooh
+I still care
+Fool that I am You say it's all in my head
+And the things I think just don't make sense
+So where you been then? Don't go all coy
+Don't turn it round on me like it's my fault
+See I can see that look in your eyes
+The one that shoots me each and every time You grace me with your cold shoulder
+Whenever you look at me I wish I was her
+You shower me with words made of knives
+Whenever you look at me I wish I was her These days when I see you
+You make it look like I'm see-through
+Do tell me why you waste our time
+When your heart ain't in it, and you're not satisfied
+You know I know just how you feel
+I'm starting to find myself feeling that way too When you grace me with your cold shoulder
+Whenever you look at me I wish I was her
+You shower me with words made of knives
+Whenever you look at me I wish I was her Time and time again, I play the role of fool
+(Just for you)
+Even in the daylight when you think that
+(I don't see you)
+Try to look for things I hear but our eyes never find
+Though I do know how you play You grace me with your cold shoulder
+Whenever you look at me I wish I was her
+You shower me with words made of knives
+Whenever you look at me I wish I was her You grace me with your cold shoulder
+Whenever you look at me I wish I was her
+You shower me with words made of knives
+Whenever you look at me I wish I was her [Adele]
+Why do you love me
+Do you love me...?
+Why do you love me
+Do you love me?
+Why do you love me
+Do you love me? Why do you love me...? Why do you love me, do you love me?
+Why do you love me, do you love me?
+Why do you love me, do you love me?
+Why do you love me? Why do you love me?
+There must be something in the water
+Cause baby I'm in deeper than I knew
+How do you keep me coming back for more
+After all we've been through
+I can't decide if I should run and hide It's above and beyond me
+It's out of my hands
+Your love drives me crazy
+It's hard to understand just why
+I want you to love me
+I want you to love me
+I want you to love me
+I want you to love me... Who knows why I love you
+It could be something in the air I breath
+Whatever it is, I depend on it
+Where does the time go?
+I spend every single moment daydreaming of you
+I can't describe how I feel, it feels right It's above and beyond me
+It's out of my hands
+Your love drives me crazy
+It's hard to understand just why
+I want you to love me
+I want you to love me
+I want you to love me
+I want you to love me You were a shock in the dark that blew me away
+And you left your mark and it never will fade
+You ignited a spark, let the fires away
+Are you ready, ready?
+You have a place in my heart that will always be yours
+You are the peak and art of my universe
+Every piece and part, you were the first
+I am ready, ready It's above and beyond me,
+It's out of my hands
+Your love drives me crazy, it's hard to understand just why
+I want you to love me
+I want you to love me
+I want you to love me
+I want you It's above and beyond me,
+It's out of my hands
+Your love drives me crazy, it's hard to understand just why
+I want you to love me
+I want you to love me
+I want you to love me
+I want you to love me... Why do you love me, do you love me?
+Why do you love me, do you love me?
+Why do you love me, do you love me?
+Why do you love me, do you love me? You said I'm stubborn and I never give in
+I think you're stubborn 'cept you're always softening
+You say I'm selfish, I agree with you on that
+I think you're giving out in way too much in fact
+I say we've only known each other a year
+You say I've known you longer my dear
+You like to be so close, I like to be alone
+I like to sit on chairs and you prefer the floor
+Walking with each other,
+Think we'll never match at all, but we do
+But we do, but we do, but we do I thought I knew myself, somehow you know me more
+I've never known this, never before
+You're the first to make up whenever we argue
+I don't know who I'd be if I didn't know you
+You're so provocative, I'm so conservative
+You're so adventurous, I'm so very cautious, combining
+You think we would and we do,
+But we do, but we do, but we do Favoritism ain't my thing but,
+In this situation I'll be glad Favoritism ain't my thing but,
+In this situation I'll be glad to make an exception You said I'm stubborn and I never give in
+I think you're stubborn 'cept you're always softening
+You say I'm selfish, I agree with you on that
+I think you're giving out in way too much in fact
+I say we've only known each other one year
+You say I've known you longer my dear
+You like to be so close, I like to be alone
+I like to sit on chairs and you prefer the floor
+Walking with each other,
+Think we'll never match at all, but we do In the darkness of my heart is a shadow of your face
+From the deepest part of my regret
+I hear the words I wish I'd said
+At the dawning of the day
+I can't wait to see the light
+Make up memories in my head
+They help to fill the emptiness you've left
+I can't drown in your tears
+I won't face your fears
+I need to fight my own
+You'll never see me again oh baby in time
+Let the weight take me under
+I know I'll survive
+You'll never see me again At the dawning of the day
+I can't bare to see the light
+Make up memories in my head
+They help to fill the emptiness you've left
+I can't drown in your tears
+I won't face your fears
+I need to fight my own
+You'll never see me again oh baby in time
+Let the weight take me under
+I know I'll survive Let the floor beneath of me fall
+Let the sky come crashing down
+Turn all my right to wrong
+But after you that goes on
+You'll never see me again
+I've been learning to live without you
+It's taken all of my stake
+But I'm stronger now You'll never see me again oh baby in time
+Let the weight take me under
+I know I'll survive Let the floor beneath of me fall
+Let the sky come crashing down
+Turn all my right to wrong
+But after you that goes on
+You'll never see me again
+You'll never see me again
+You'll never see me again I want to see your face in every kind of light
+In fields of dawn and forests of the night
+And when you stand before the candles on a cake
+Oh, let me be the one to hear the silent wish you make What are you doing the rest of your life?
+North and South and East and West of your life
+I have only one request of your life
+That you spend it all with me All the seasons and the times of your days
+All the nickels and the dimes of your days
+Let the reasons and the rhymes of your days
+All begin and end with me I want to see your face in every kind of light
+In the fields of dawn and the forests of the night
+And when you stand before the candles on a cake
+Oh, let me be the one to hear the silent wish you make Those tomorrows waiting deep in your eyes
+In the world of love that you keep in your eyes
+I'll awaken what's asleep in your eyes
+It may take a kiss or two Through all of my life
+Summer, Winter, Spring, and Fall of my life
+All I ever will recall of my life
+Is all of my life with you Wait, do you see my heart on my sleeve?
+It's been there for days on end and
+It's been waiting for you to open up
+Yours too baby, come on now
+I'm trying to tell you just how
+I'd like to hear the words roll out of your mouth finally
+Say that it's always been me That's made you feel the way you've never felt before
+And I'm all you need and that you never want more
+Then you'd say all of the right things without a clue
+But you'd save the best for last
+Like I'm the one for you You should know that you're just a temporary fix
+This is not rooted with you it don't mean that much to me
+Oh just a filler in the space that happened to be free
+How dare you think you'd get away with trying to play me Why is it every time I think I've tried my hardest
+It turns out it ain't enough
+You're still not mentioning love
+What am I supposed to do to make you want me properly?
+I'm taking these chances and getting nowhere
+And though I'm trying my hardest you go back to her
+And I think that I know things may never change
+I'm still hoping one day I might hear you say I make you feel the way you've never felt before
+And I'm all you need and that you never want more
+Then you'd say all of the right things without a clue
+But you'd save the best for last
+Like I'm the one for you You should know that you're just a temporary fix
+This is not rooted with you it don't mean that much to me
+Oh just a filler in the space that happened to be free
+How dare you think you'd get away with trying to play me But, despite the truth that I know
+I find it hard to let go and give up on you
+Seems I love the things you do
+Like the meaner you treat me the more eager I am
+To persist with this heartbreak and running around
+And I will do until I'm finding myself you And make you feel a way you've never felt before
+And be all you need so that you never want more
+And you'll say all of the right things without a clue
+And you'll be the one for me and me the one for you I let it fall, my heart,
+And as it fell you rose to claim it
+It was dark and I was over
+Until you kissed my lips and you saved me My hands, they're strong
+But my knees were far too weak
+To stand in your arms
+Without falling to your feet But there's a side to you
+That I never knew, never knew
+All the things you'd say
+They were never true, never true
+And the games you play
+You would always win, always win But I set fire to the rain
+Watched it pour as I touched your face
+Well, it burned while I cried
+'Cause I heard it screaming Out your name,
+Your name When I lay with you
+I could stay there
+Close my eyes
+Feel you here forever
+You and me together nothing gets better 'Cause there's a side to you
+That I never knew, never knew
+All the things you'd say
+They were never true, never true
+And the games you play
+You would always win, always win But I set fire to the rain
+Watched it pour as I touched your face
+Well, it burned while I cried
+'Cause I heard it screaming out your name,
+Your name I set fire to the rain
+And I threw us into the flames
+Well, it felt something died
+'Cause I knew that that was
+The last time, the last time Sometimes I wake up by the door,
+That heart you caught must be waiting for you
+Even now when we're already over
+I can't help myself from looking for you I set fire to the rain
+Watched it pour as I touched your face
+Well, it burned while I cried
+'Cause I heard it screaming Out your name,
+Your name I set fire to the rain,
+And I threw us into the flames
+Well, it felt something died
+'Cause I knew that, that was the last time
+The last time Let it burn
+Let it burn
+Let it burn [Adele]
+I would never lie to you unless you tell me to...
+Every part of me
+All my words to hold
+And hold against me
+Why won't you let it be? Don't you ever say my love opened up your heart
+No I'm not gonna do it standing up
+The words don't come out right when you're right in front of me
+Help me baby
+Won't you turn off the lights Lay me down
+'til the morning!
+Lay me down (through the night)
+Lay me down (I can fall in)
+Lay me down (Won't you)
+Lay me down (I can baby)
+Lay me down (Someone believe me) I would never break the rules unless you tell me to
+You can read my mind, be it truth or lies
+Lie down beside me, why won't you let it be? Don't you ever say my love opened up your heart
+No I'm not gonna do it standing up
+The words don't come out right when you're right in front of me
+Help me baby, won't you turn off the lights Lay me down ('til the morning)
+Lay me down (through the night)
+Lay me down (I can fall in)
+Lay me down (Won't you)
+Lay me down (I can baby)
+Lay me down (Someone believe me) Lay down with me
+Lay down with me
+Lay down with me
+Lay down with me Words don't come out right when you're right in front of me
+Help me baby, won't you turn off the lights Lay me down ('til the morning)
+Lay me down (through the night)
+Lay me down (I can fall in)
+Lay me down (Won't you)
+Lay me down (I can baby)
+Lay me down
+Someone believe me Never been a girl who used to cry
+Didn`t show emotions, don`t know why
+Didn`t wanna feel the pain inside, I guess But as the years keep going by,
+you came along and changed my mind
+I should leave the past behind me,
+I should let you find me,
+supposed to stay beside me
+You were supposed to guide me,
+through the ups and downs,
+you were always gonna be around until the end I still think we could
+`cause you and me, we`re good
+And I`ll tell you why this hurts, 'cause I`m sober But I just wanna be drunk
+so I can forget about you
+and all the stupid things that love has put me through
+Even when I've had too much,
+I still feel your touch
+Maybe this just means that I`m not drunk enough So I pour myself another drink
+whenever I start to think about you
+`cause I do but I really don`t want to
+but sometimes my dreams just come through And when I get there,
+to a place where I see you in a kitchen
+I start wishing for that thing and I don`t need you,
+I don`t really wanna see you
+and I don`t want you to see me,
+you would think that I was crazy,
+you might think that I wanna be close to you
+but I`d rather wanna drink some Whisky
+and maybe have a little sip `o wine
+`cause right now it`s the only thing that makes me forget you were mine
+but right now I am sober But I just wanna be drunk
+so I can forget about you
+and all the stupid things that love has put me through
+Even when I've had too much,
+I still feel your touch
+Maybe this just means that I`m not drunk enough I still think we could
+(I`m not drunk enough)
+`cause you and me, we`re good
+`cause I`m sober But I just wanna be drunk
+so I can forget about you
+and all the stupid things that love has put me through
+Even when I've had too much,
+I still feel your touch
+Maybe this just means that I`m not drunk enough (I still think we could)
+But I just wanna be drunk
+so I can forget about you
+and all the stupid things that love has put me through
+(`cause you and me we`re good)
+Even when I've had too much,
+I still feel your touch
+Maybe this just means that I`m not drunk enough Think I've had enough
+I must my way
+I've fallen off the edge to find that I've gone blind
+You're leading me astray
+You haunt me like a ghost
+And that scares me the most
+There you are the devil on my shoulder
+Smiling as the flames are growing colder
+How can I believer what I have?
+For a little confidence I'll grab But when my hand goes out don't take it for I'm trying to make it on my own
+I fell it in my bones any minute now!
+This train of thought will leave the statio
+My impatience will come out to play
+You've turned out to be the only face I see!
+Running through the empty hallways I can tell that I am not alone You spin a web in every room
+You spin a web in every room
+And try to break the backbone that I've grown
+Will I make my own path or wander where I'm thrown
+Will I make my own path or wander where I'm thrown
+Or wander where I'm thrown? When we used
+To say goodnight
+I'd always kiss
+And hold you tight
+But lately
+You don't seem
+To care
+You close the door
+And leave me
+Standing there
+Oh, honey
+That's not fair
+That's it
+I quit
+I'm movin' on The other night
+We had a date
+An you showed up
+Two hours late
+And though your hair
+Was all in place
+Somebody smeared
+Their lipstick
+On your face
+Oh, they smeared it
+Every place
+Ye that's it honey
+I quit I'm movin' on [Chorus]
+You made me want you
+You made me leave you
+You made me tumble
+And fall
+But if I
+Can't have you the way
+I want you
+I don't want you at all Baby, I can take a lot
+'Cause I love
+Everything you got
+Though your kisses
+Fill me
+So if you got
+Someone else
+I gotta go
+Oh, that you know
+Ye that's it honey
+I quit I'm movin' on [Chorus] Baby
+I can take a lot
+'Cause I love
+Everything you got
+Though your kisses
+Fill me
+So if you got
+Someone else
+I gotta go
+Oh, that you know
+So that's it baby
+I quit I'm movin' on
+Ye that's it baby
+I quit now
+I'm movin' on Don't ask me
+What you know is true
+Don't have to tell you
+I love your precious heart I was standing
+You were there
+Two worlds collided
+And they could never tear us apart We could live
+For a thousand years
+But if I hurt you
+I'd make wine from your tears I told you
+That we could fly
+'Cause we all have wings
+But some of us don't know why I
+I was standing
+You were there
+Two worlds collided
+And they could never ever tear us apart I know sometimes you're scared of the light
+But how will you ever know if you never try
+There's something new inside my heart
+And it grabs like a child whenever we're apart
+I see your face under every sky
+I find the less I look, more I find
+So let's go back there, back to the star
+You know I'm never gonna leave you
+You're the only one I want
+Let's go back there, back to the star
+You know I'm never gonna leave you
+You're the only one I want You know sometimes that I'm scared of the dark
+But I'm feeling sun babe when I'm in your arms
+You said my name in the dead of glory
+You hold me alright
+When I'm short of falling So let's go back there, back to the star
+You know I'm never gonna leave you
+You're the only one I want
+Let's go back there, back to the star
+You know I'm never gonna leave you
+You're the only one I want There will be times
+When we'll try to give it up
+Bursting out, it seems no doubt that will almost fall apart than burn to pieces
+And we'll watch them turn to dust
+But without each other, nothing is easy enough So let's go back there, back to the star
+You know I'm never gonna leave you
+You're the only one I want
+Let's go back there, back to the star
+You know I'm never gonna leave you
+'cause you're the only one I want, yeah
+You're the only one
+Never gonna leave you
+No, I'm never gonna leave you, no Go ahead, go ahead and smash it on the floor
+Take whatever is left, and take it with you out the door
+See if I cry
+See if I shed a single sorry tear
+Can't say that it's been that great
+No in fact it's been a wasted worried year [Chorus]
+Everybody sees
+And everyone agrees
+That you and I are wrong
+And it's been that way to long
+Take it as it comes
+And be thankful when it's done
+There's so many ways to act
+And there's many shades of black
+There's so many shades of black Let it out, let it all out
+Say what's on your mind
+You can kick and scream and shout and say things that are so unkind
+Yeah-see if I care, see if I stand firm or if I fall
+Cause in the back of my mind, and on the tip of my tongue
+Is the answer to it all [Chorus] Yeah there's many shades of black [Chorus] Cause there's many shades of black
+There's so many shades of black
+Yeah there's any shades of black
+There's so many shades of black
+Yeah there's many shades of black
+There's so many shades of black
+And there's many shades of black
+There's so many shades of black Go ahead... Last night she said
+Oh, baby
+I feel so down
+Oh, and turned me off
+When I feel left out
+So I
+I turned around
+Oh, baby
+I don't care no more
+I know this for sure
+I'm walking
+Out that door Well, I've been in town
+For just about fifteen
+Whole minutes now
+Oh, baby, I feel so down
+And I don't know why
+I keep walking for miles But the people
+They don't understand
+No, girlfriends
+They can't understand
+Your grandsons
+They won't understand
+On top of this
+I ain't ever
+Gonna understand Last night she said
+Oh, baby
+Don't feel so down
+Oh, and turned me off
+When I feel left out
+So I, I turned around
+Oh, baby
+I'm gonna be alright
+It was a great big lie
+Cuz I left that night
+Yeah Oh, people
+They don't understand
+No, girlfriends
+They don't understand
+In spaceships
+They won't understand
+And me
+I ain't ever
+Gonna understand Last night she said
+Oh, baby
+I feel so down
+She had turned me off
+When I feel left out
+So I
+I turned around
+Oh, little girl
+I don't care no more
+I know this for sure
+I'm walking
+Out that door, yeah Painting pictures with my mind
+Making memories using my eyes
+Filling up my heart with golden stories
+Who adds some spice to the rhythm of life, oh Welcome sunrise with the morning glory
+I've changed my mind
+There is no simple
+I thought of me, I want to see
+I want to feel my heartbeat so
+With the world that you feel, leave I can feel the pressure pushing onto my heart
+And it's teasing me
+To scratch my itch and beat my drum
+So I can start to begin what's begun Painting pictures
+Filling up my heart with golden stories Painting pictures
+Filling up my heart with golden stories Running riots inside my soul
+Fire burning and it's lighting me up
+To scratch my itch and beat my drum
+So I can finish what has begun Painting pictures
+Filling up my heart with golden stories Painting pictures
+Filling up my heart with golden stories Sometimes the hole you left hurts
+My heart so bad, it cuts through
+The deepest parts of me and fills up my mouth with the words that cry
+Out, I'm still trying to stay inside Hearts break and hearts wait
+To make us grow from dust
+Then our eyes cry and souls sigh
+So that we know that it hurts Our hearts break and hearts wait
+To make us grow from dust
+Then our eyes cry and souls sigh
+So that we know that it hurts Every now and then my memories ache
+With empty ideas of the ones we'd have made it
+But as time goes on and my age gets older
+I love the ones I know, they're enough to picture the rest 'Cause heart break and hearts wait
+To make us grow from dust
+Then our eyes cry and souls sigh
+So that we know that it hurts Our hearts break and hearts wait
+To make us grow from dust
+Then our eyes cry and souls sigh
+So that we know that it hurts You know when to make me, imagine you're here
+You know when to make me, imagine you're here
+You know when to make me, imagine you're here
+You know when to make me, imagine you're here Find yourself a girl
+And settle down
+Live a simple life
+In a quiet town Steady as she goes
+(Steady as she goes)
+Steady as she goes
+(Steady as she goes) So steady as she goes Your friends have shown
+A kink
+In the single life
+You've had
+Too much to think
+Now you need a wife Steady as she goes
+(Steady as she goes)
+So steady as she goes
+(Steady as she goes) Well here we go again
+You've found yourself
+A friend
+That knows you well
+But no matter
+What you do
+You'll always feel
+As though you
+Tripped and fell So steady as she goes When you have completed
+What you thought
+You had to do
+And your blood's
+Depleted
+To the point
+Of stable glue Then you'll get along
+Then you'll get along Steady as she goes
+(Steady as she goes)
+So steady as she goes
+(Steady as she goes) Well here we go again
+You've found yourself
+A friend
+That knows you well
+But no matter
+What you do
+You'll always feel
+As though you
+Tripped and fell So steady as she goes
+Steady as she goes Settle for a girl
+(Settle for a girl)
+Neither up or down
+(Neither up or down)
+Sell it to the crowd
+(Sell it to the crowd)
+That is gathered round
+(That is gathered round) Settle for a girl
+(Settle for a girl)
+Neither up or down
+(Neither up or down)
+Sell it to the crowd
+(Sell it to the crowd)
+That is gathered round
+(That is gathered round) So steady as she goes
+(Steady as she goes)
+Steady as she goes
+(Steady as she goes) Steady as she goes
+(Steady as she goes)
+So steady as she goes
+(Steady as she goes) Steady as she go
+Are you steady now?
+Steady as she goes
+Are you steady now? Steady as she goes
+Are you steady now?
+Steady as she goes
+Are you steady now? Steady as she goes I'm insane in the brain
+You're not already...
+Feel the pain running through my veins
+Don't you piss me off, pretentious, ostentatious
+Other words are spring to me
+... emolicious, for the shoot posses no... And you want me to respect you
+And have... for yourself
+You're out of control with nobody around to help
+Help, help oh oh. Chorus:
+This time you're on your own
+Running back to mommy hoping that she's home
+But if she's not there and you're on your alone
+So... you then go calling
+Call it a fiasco, call it a fiasco, fiasco
+... fiasco, fiasco,... fiasco
+1 2 3 4.
+Hustle...
+Wanna try to testify in a... of happiness
+Be the best, have success,
+Doesn't mean you're Hollywood Feel blessed not impressed
+By the glamour if you think you could. And you want me to respect you
+And have... for yourself
+You're out of control with nobody around to help
+Help, help oh oh. Chorus:
+This time you're on your own
+Running about the mammy hoping that she's home
+But if she's not there and you're on your alone
+So... you then go calling
+Fiasco, call it fiasco, fiasco
+... fiasco, fiasco,... fiasco
+1 2 3 4. Fiasco, fiasco [Chorus:]
+1 2 3 4
+I'm calling, I'm calling, I'm calling it fiasco,
+I'm calling, I'm calling, I'm calling it fiasco,
+I'm calling, I'm calling, I'm calling it fiasco. 
+    </textarea>
+    <h3> Source 2 (default: Dr. Seuss) </h3>
+    <textarea style="width:100%; height:200px;" id="ti2">
+The Cat in the Hat
+By Dr. Seuss
+The sun did not shine.
+It was too wet to play.
+So we sat in the house
+All that cold cold wet day.
+I sat there with Sally.
+We sat there we two.
+And I said How I wish
+We had something to do!
+Too wet to go out
+And too cold to play ball.
+So we sat in the house.
+We did nothing at all.
+So all we could do was to
+Sit!
+Sit!
+Sit!
+Sit!
+And we did not like it.
+Not one little bit.
+BUMP!
+And then
+something went BUMP!
+How that bump made us jump!
+We looked!
+Then we saw him step in on the mat!
+We looked!
+And we saw him!
+The Cat in the Hat!
+And he said to us
+Why do you sit there like that?
+I know it is wet
+And the sun is not sunny.
+But we can have
+Lots of good fun that is funny!
+I know some good games we could play
+Said the cat.
+I know some new tricks
+Said the Cat in the Hat.
+A lot of good tricks.
+I will show them to you.
+Your mother
+Will not mind at all if I do.
+Then Sally and I
+Did not know what to say.
+Our mother was out of the house
+For the day.
+But our fish said No! No!
+Make that cat go away!
+Tell that Cat in the Hat
+You do NOT want to play.
+He should not be here.
+He should not be about.
+He should not be here
+When your mother is out!
+Now! Now! Have no fear.
+Have no fear! said the cat.
+My tricks are not bad
+Said the Cat in the Hat.
+Why we can have
+Lots of good fun if you wish
+with a game that I call
+UP UP UP with a fish!
+Put me down! said the fish.
+This is no fun at all!
+Put me down! said the fish.
+I do NOT wish to fall!
+Have no fear! said the cat.
+I will not let you fall.
+I will hold you up high
+As I stand on a ball.
+With a book on one hand!
+And a cup on my hat!
+But that is not ALL I can do!
+Said the cat
+Look at me!
+Look at me now! said the cat.
+With a cup and a cake
+On the top of my hat!
+I can hold up TWO books!
+I can hold up the fish!
+And a litte toy ship!
+And some milk on a dish!
+And look!
+I can hop up and down on the ball!
+But that is not all!
+Oh no.
+That is not all
+Look at me!
+Look at me!
+Look at me NOW!
+It is fun to have fun
+But you have to know how.
+I can hold up the cup
+And the milk and the cake!
+I can hold up these books!
+And the fish on a rake!
+I can hold the toy ship
+And a little toy man!
+And look! With my tail
+I can hold a red fan!
+I can fan with the fan
+As I hop on the ball!
+But that is not all.
+Oh no.
+That is not all.
+That is what the cat said
+Then he fell on his head!
+He came down with a bump
+From up there on the ball.
+And Sally and I
+We saw ALL the things fall!
+And our fish came down too.
+He fell into a pot!
+He said Do I like this?
+Oh no! I do not.
+This is not a good game
+Said our fish as he lit.
+No I do not like it
+Not one little bit!
+Now look what you did!
+Said the fish to the cat.
+Now look at this house!
+Look at this! Look at that!
+You sank our toy ship
+Sank it deep in the cake.
+You shook up our house
+And you bent our new rake.
+You SHOULD NOT be here
+When our mother is not.
+You get out of this house!
+Said the fish in the pot.
+But I like to be here.
+Oh I like it a lot!
+Said the Cat in the Hat
+To the fish in the pot.
+I will NOT go away.
+I do NOT wish to go!
+And so said the Cat in the Hat
+So
+so
+so
+I will show you
+Another good game that I know!
+And then he ran out.
+And then fast as a fox
+The Cat in the Hat
+Came back in with a box.
+A big red wood box.
+It was shut with a hook.
+Now look at this trick
+Said the cat.
+Take a look!
+Then he got up on top
+With a tip of his hat.
+I call this game FUN IN A BOX
+Said the cat.
+In this box are two things
+I will show to you now.
+You will like these two things
+Said the cat with a bow.
+I will pick up the hook.
+You will see something new.
+Two things. And I call them
+Thing One and Thing Two.
+These Things will not bite you.
+They want to have fun.
+Then out of the box
+Came Thing Two and Thing One!
+And they ran to us fast.
+They said How do you do?
+Would you like to shake hands
+With Thing One and Thing Two?
+And Sally and I
+Did not know what to do.
+So we had to shake hands
+With Thing One and Thing Two.
+We shook their two hands.
+But our fish said No! No!
+Those Things should not be
+In this house! Make them go!
+They should not be here
+When your mother is not!
+Put them out! Put them out!
+Said the fish in the pot.
+Have no fear little fish
+Said the Cat in the Hat.
+These Things are good Things.
+And he gave them a pat.
+They are tame. Oh so tame!
+They have come here to play.
+They will give you some fun
+On this wet wet wet day.
+Now here is a game that they like
+Said the cat.
+They like to fly kites
+Said the Cat in the Hat
+No! Not in the house!
+Said the fish in the pot.
+They should not fly kites
+In a house! They should not.
+Oh the things they will bump!
+Oh the things they will hit!
+Oh I do not like it!
+Not one little bit! Then Sally and I
+Saw them run down the hall.
+We saw those two Things
+Bump their kites on the wall!
+Bump! Thump! Thump! Bump!
+Down the wall in the hall.
+Thing Two and Thing One!
+They ran up! They ran down!
+On the string of one kite
+We saw Mothers new gown!
+Her gown with the dots
+That are pink white and red.
+Then we saw one kite bump
+On the head of her bed!
+Then those Things ran about
+With big bumps jumps and kicks
+And with hops and big thumps
+And all kinds of bad tricks.
+And I said
+I do NOT like the way that they play
+If Mother could see this
+Oh what would she say!
+Then our fish said Look! Look!
+And our fish shook with fear.
+Your mother is on her way home!
+Do you hear?
+Oh what will she do to us?
+What will she say?
+Oh she will not like it
+To find us this way!
+So DO something! Fast! said the fish.
+Do you hear!
+I saw her. Your mother!
+Your mother is near!
+So as fast as you can
+Think of something to do!
+You will have to get rid of
+Thing One and Thing Two!
+So as fast as I could
+I went after my net.
+And I said With my net
+I can get them I bet.
+I bet with my net
+I can get those Things yet!
+Then I let down my net.
+It came down with a PLOP!
+And I had them! At last!
+Thoe two Things had to stop.
+Then I said to the cat
+Now you do as I say.
+You pack up those Things
+And you take them away!
+Oh dear! said the cat
+You did not like our game
+Oh dear.
+What a shame!
+What a shame!
+What a shame!
+Then he shut up the Things
+In the box with the hook.
+And the cat went away
+With a sad kind of look.
+That is good said the fish.
+He has gone away. Yes.
+But your mother will come.
+She will find this big mess!
+And this mess is so big
+And so deep and so tall
+We ca not pick it up.
+There is no way at all!
+And THEN!
+Who was back in the house?
+Why the cat!
+Have no fear of this mess
+Said the Cat in the Hat.
+I always pick up all my playthings
+And so
+I will show you another
+Good trick that I know!
+Then we saw him pick up
+All the things that were down.
+He picked up the cake
+And the rake and the gown
+And the milk and the strings
+And the books and the dish
+And the fan and the cup
+And the ship and the fish.
+And he put them away.
+Then he said That is that.
+And then he was gone
+With a tip of his hat.
+Then our mother came in
+And she said to us two
+Did you have any fun?
+Tell me. What did you do?
+And Sally and I did not know
+What to say.
+Should we tell her
+The things that went on there that day?
+Should we tell her about it?
+Now what SHOULD we do?
+Well
+What would YOU do
+If your mother asked YOU?
+Fox in Socks by Dr. Seuss
+Fox
+Socks
+Box
+Knox
+Knox in box.
+Fox in socks.
+Knox on fox in socks in box.
+Socks on Knox and Knox in box.
+Fox in socks on box on Knox.
+Chicks with bricks come.
+Chicks with blocks come.
+Chicks with bricks and blocks and clocks come.
+Look sir. Look sir. Mr. Knox sir.
+Lets do tricks with bricks and blocks sir.
+Lets do tricks with chicks and clocks sir.
+First Ill make a quick trick brick stack.
+Then Ill make a quick trick block stack.
+You can make a quick trick chick stack.
+You can make a quick trick clock stack.
+And heres a new trick Mr. Knox.
+Socks on chicks and chicks on fox.
+Fox on clocks on bricks and blocks.
+Bricks and blocks on Knox on box.
+Now we come to ticks and tocks sir.
+Try to say this Mr. Knox sir.
+Clocks on fox tick.
+Clocks on Knox tock.
+Six sick bricks tick.
+Six sick chicks tock.
+Please sir. I dont like this trick sir.
+My tongue isnt quick or slick sir.
+I get all those ticks and clocks sir
+mixed up with the chicks and tocks sir.
+I cant do it Mr. Fox sir.
+Im so sorry Mr. Knox sir.
+Heres an easy game to play.
+Heres an easy thing to say.
+New socks.
+Two socks.
+Whose socks?
+Sues socks.
+Who sews whose socks?
+Sue sews Sues socks.
+Who sees who sew whose new socks sir?
+You see Sue sew Sues new socks sir.
+Thats not easy Mr. Fox sir.
+Who comes?
+Crow comes.
+Slow Joe Crow comes.
+Who sews crows clothes?
+Sue sews crows clothes.
+Slow Joe Crow sews whose clothes?
+Sues clothes.
+Sue sews socks of fox in socks now.
+Slow Joe Crow sews Knox in box now.
+Sue sews rose on Slow Joe Crows clothes.
+Fox sews hose on Slow Joe Crows nose.
+Hose goes.
+Rose grows.
+Nose hose goes some.
+Crows rose grows some.
+Mr. Fox!
+I hate this game sir.
+This game makes my tongue quite lame sir.
+Mr. Knox sir what a shame sir.
+Well find something new to do now.
+Here is lots of new blue goo now.
+New goo. Blue goo.
+Gooey. Gooey.
+Blue goo. New goo.
+Gluey. Gluey.
+Gooey goo for chewy chewing!
+Thats what that Goo Goose is doing.
+Do you choose to chew goo too sir?
+If sir you sir choose to chew sir
+with the Goo Goose chew sir.
+Do sir.
+Mr. Fox sir
+I wont do it.
+I cant say.
+I wont chew it.
+Very well sir.
+Step this way.
+Well find another game to play.
+Bim comes.
+Ben comes.
+Bim brings Ben broom.
+Ben brings Bim broom.
+Ben bends Bims broom.
+Bim bends Bens broom.
+Bims bends.
+Bens bends.
+Bens bent broom breaks.
+Bims bent broom breaks.
+Bens band. Bims band.
+Big bands. Pig bands.
+Bim and Ben lead bands with brooms.
+Bens band bangs and Bims band booms.
+Pig band! Boom band!
+Big band! Broom band!
+My poor mouth cant say that. No sir.
+My poor mouth is much too slow sir.
+Well then bring your mouth this way.
+Ill find it something it can say.
+Luke Luck likes lakes.
+Lukes duck likes lakes.
+Luke Luck licks lakes.
+Lucks duck licks lakes.
+Duck takes licks in lakes Luke Luck likes.
+Luke Luck takes licks in lakes duck likes.
+I cant blab such blibber blubber!
+My tongue isnt make of rubber.
+Mr. Knox. Now come now. Come now.
+You dont have to be so dumb now.
+Try to say this Mr. Knox please.
+Through three cheese trees three free fleas flew.
+While these fleas flew freezy breeze blew.
+Freezy breeze made these three trees freeze.
+Freezy trees made these trees cheese freeze.
+Thats what made these three free fleas sneeze.
+Stop it! Stop it!
+Thats enough sir.
+I cant say such silly stuff sir.
+Very well then Mr. Knox sir.
+Lets have a little talk about tweetle beetles.
+What do you know about tweetle beetles? Well
+When tweetle beetles fight
+its called a tweetle beetle battle.
+And when they battle in a puddle
+its a tweetle beetle puddle battle.
+AND when tweetle beetles battle with paddles in a puddle
+they call it a tweetle beetle puddle paddle battle.
+AND
+When beetles battle beetles in a puddle paddle battle
+and the beetle battle puddle is a puddle in a bottle
+they call this a tweetle beetle bottle puddle paddle battle muddle.
+AND
+When beetles fight these battles in a bottle with their paddles
+and the bottles on a poodle and the poodles eating noodles
+they call this a muddle puddle tweetle poodle beetle noodle
+bottle paddle battle.
+AND
+Now wait a minute Mr. Socks Fox!
+When a fox is in the bottle where the tweetle beetles battle
+with their paddles in a puddle on a noodle eating poodle
+THIS is what they call
+a tweetle beetle noodle poodle bottled paddled
+muddled duddled fuddled wuddled fox in socks sir!
+Fox in socks our game is done sir.
+Thank you for a lot of fun sir.
+I am Sam
+I am Sam
+Sam I am
+That Sam I am
+That Sam I am!
+I do not like
+that Sam I am
+Do you like
+green eggs and ham
+I do not like them
+Sam I am.
+I do not like
+green eggs and ham.
+Would you like them
+Here or there?
+I would not like them
+here or there.
+I would not like them
+anywhere.
+I do not like
+green eggs and ham.
+I do not like them
+Sam I am
+Would you like them
+in a house?
+Would you like them
+with a mouse?
+I do not like them
+in a house.
+I do not like them
+with a mouse.
+I do not like them
+here or there.
+I do not like them
+anywhere.
+I do not like green eggs and ham.
+I do not like them Sam I am.
+Would you eat them
+in a box?
+Would you eat them
+with a fox?
+Not in a box.
+Not with a fox.
+Not in a house.
+Not with a mouse.
+I would not eat them here or there.
+I would not eat them anywhere.
+I would not eat green eggs and ham.
+I do not like them Sam I am.
+Would you? Could you?
+in a car?
+Eat them! Eat them!
+Here they are.
+I would not
+could not
+in a car
+You may like them.
+You will see.
+You may like them
+in a tree?
+d not in a tree.
+I would not could not in a tree.
+Not in a car! You let me be.
+I do not like them in a box.
+I do not like them with a fox
+I do not like them in a house
+I do mot like them with a mouse
+I do not like them here or there.
+I do not like them anywhere.
+I do not like green eggs and ham.
+I do not like them Sam I am.
+A train! A train!
+A train! A train!
+Could you would you
+on a train?
+Not on a train! Not in a tree!
+Not in a car! Sam! Let me be!
+I would not could not in a box.
+I could not would not with a fox.
+I will not eat them with a mouse
+I will not eat them in a house.
+I will not eat them here or there.
+I will not eat them anywhere.
+I do not like them Sam I am.
+Say!
+In the dark?
+Here in the dark!
+Would you could you in the dark?
+I would not could not
+in the dark.
+Would you could you
+in the rain?
+I would not could not in the rain.
+Not in the dark. Not on a train
+Not in a car Not in a tree.
+I do not like them Sam you see.
+Not in a house. Not in a box.
+Not with a mouse. Not with a fox.
+I will not eat them here or there.
+I do not like them anywhere!
+You do not like
+green eggs and ham?
+I do not
+like them
+Sam I am.
+Could you would you
+with a goat?
+I would not
+could not.
+with a goat!
+Would you could you
+on a boat?
+I could not would not on a boat.
+I will not will not with a goat.
+I will not eat them in the rain.
+I will not eat them on a train.
+Not in the dark! Not in a tree!
+Not in a car! You let me be!
+I do not like them in a box.
+I do not like them with a fox.
+I will not eat them in a house.
+I do not like them with a mouse.
+I do not like them here or there.
+I do not like them ANYWHERE!
+I do not like
+green eggs
+and ham!
+I do not like them
+Sam I am.
+You do not like them.
+SO you say.
+Try them! Try them!
+And you may.
+Try them and you may I say.
+Sam!
+If you will let me be
+I will try them.
+You will see.
+Say!
+I like green eggs and ham!
+I do!! I like them Sam I am!
+And I would eat them in a boat!
+And I would eat them with a goat
+And I will eat them in the rain.
+And in the dark. And on a train.
+And in a car. And in a tree.
+They are so good so good you see!
+So I will eat them in a box.
+And I will eat them with a fox.
+And I will eat them in a house.
+And I will eat them with a mouse.
+And I will eat them here and there.
+Say! I will eat them ANYWHERE!
+I do so like
+green eggs and ham!
+Thank you!
+Thank you
+Sam I am
+How The Grinch Stole Christmas
+by Dr. Suess
+Every Who Down in Whoville Liked Christmas a lot
+But the GrinchWho lived just north of Whoville Did NOT!
+The Grinch hated Christmas! The whole Christmas season!
+Now please dont ask why. No one quite knows the reason.
+It could be his head wasnt screwed on just right.
+It could be perhaps that his shoes were too tight.
+But I think that the most likely reason of all
+May have been that his heart was two sizes too small.
+Whatever the reason His heart or his shoes
+He stood there on Christmas Eve hating the Whos
+Staring down from his cave with a sour Grinchy frown
+At the warm lighted windows below in their town.
+For he knew every Who down in Whoville beneath
+Was busy now hanging a mistletoe wreath.
+And theyre hanging their stockings! he snarled with a sneer
+Tomorrow is Christmas! Its practically here!
+Then he growled with his Grinch fingers nervously drumming
+I MUST find some way to stop Christmas from coming!
+For Tomorrow he knew all the Who girls and boys
+Would wake bright and early. Theyd rush for their toys!
+And then! Oh the noise! Oh the Noise!
+Noise! Noise! Noise!
+Thats one thing he hated! The NOISE!
+NOISE! NOISE! NOISE!
+Then the Whos young and old would sit down to a feast.
+And theyd feast! And theyd feast! And theyd FEAST!
+FEAST! FEAST! FEAST!
+They would feast on Who pudding and rare Who roast beast.
+Which was something the Grinch couldnt stand in the least!
+And THEN Theyd do something He liked least of all!
+Every Who down in Whoville the tall and the small
+Would stand close together with Christmas bells ringing.
+Theyd stand hand in hand. And the Whos would start singing!
+Theyd sing! And theyd sing! And theyd SING!
+SING! SING! SING!
+And the more the Grinch thought of this Who ChristmasSing
+The more the Grinch thought I must stop this whole thing!
+Why for fifty three years Ive put up with it now!
+I MUST stop this Christmas from coming! But HOW?
+Then he got an idea! An awful idea!
+THE GRINCH GOT A WONDERFUL AWFUL IDEA!
+I know just what to do! The Grinch laughed in his throat.
+And he made a quick Santy Claus hat and a coat.
+And he chuckled and clucked What a great Grinchy trick!
+With this coat and this hat I look just like Saint Nick!
+All I need is a reindeer The Grinch looked around.
+But since reindeer are scarce there was none to be found.
+Did that stop the old Grinch? No! The Grinch simply said
+If I cant find a reindeer Ill make one instead!
+So he called his dog Max. Then he took some red thread
+And he tied a big horn on the top of his head.
+THEN He loaded some bags And some old empty sacks
+On a ramshackle sleigh And he hitched up old Max.
+Then the Grinch said Giddap! And the sleigh started down
+Toward the homes where the Whos Lay asnooze in their town.
+All their windows were dark. Quiet snow filled the air.
+All the Whos were all dreaming sweet dreams without care.
+When he came to the first little house on the square.
+This is stop number one the old Grinchy Claus hissed
+And he climbed to the roof empty bags in his fist.
+Then he slid down the chimney. A rather tight pinch.
+But if Santa could do it then so could the Grinch.
+He got stuck only once for a moment or two.
+Then he stuck his head out of the fireplace flue.
+Where the little Who stockings all hung in a row.
+These stockings he grinned are the first things to go!
+Then he slithered and slunk with a smile most unpleasant
+Around the whole room and he took every present!
+Pop guns! And bicycles! Roller skates! Drums!
+Checkerboards! Tricycles! Popcorn! And plums!
+And he stuffed them in bags. Then the Grinch very nimbly
+Stuffed all the bags one by one up the chimney!
+Then he slunk to the icebox. He took the Whos feast!
+He took the Who pudding! He took the roast beast!
+He cleaned out that icebox as quick as a flash.
+Why that Grinch even took their last can of Who hash!
+Then he stuffed all the food up the chimney with glee.
+And NOW! grinned the Grinch I will stuff up the tree!
+And the Grinch grabbed the tree and he started to shove
+When he heard a small sound like the coo of a dove.
+He turned around fast and he saw a small Who!
+Little Cindy Lou Who who was not more than two.
+The Grinch had been caught by this tiny Who daughter
+Whod got out of bed for a cup of cold water.
+She stared at the Grinch and said Santy Claus why????????????
+Why are you taking our Christmas tree? WHY?
+But you know that old Grinch was so smart and so slick
+He thought up a lie and he thought it up quick!
+Why my sweet little tot the fake Santy Claus lied
+Theres a light on this tree that wont light on one side.
+So Im taking it home to my workshop my dear.
+Ill fix it up there. Then Ill bring it back here.
+And his fib fooled the child. Then he patted her head
+And he got her a drink and he sent her to bed.
+And when CindyLou Who went to bed with her cup
+HE went to the chimney and stuffed the tree up!
+Then the last thing he took Was the log for their fire!
+Then he went up the chimney himself the old liar.
+On their walls he left nothing but hooks and some wire.
+And the one speck of food That he left in the house
+Was a crumb that was even too small for a mouse.
+Then He did the same thing To the other Whos houses
+Leaving crumbs Much too small For the other Whos mouses!
+It was quarter past dawn All the Whos still a bed
+All the Whos still asnooze When he packed up his sled
+Packed it up with their presents! The ribbons! The wrappings!
+The tags! And the tinsel! The trimmings! The trappings!
+Three thousand feet up! Up the side of Mt. Crumpit
+He rode with his load to the tiptop to dump it!
+PoohPooh to the Whos! he was grinchishly humming.
+Theyre finding out now that no Christmas is coming!
+Theyre just waking up! I know just what theyll do!
+Their mouths will hang open a minute or two
+Then the Whos down in Whoville will all cry BooHoo!
+Thats a noise grinned the Grinch That I simply MUST hear!
+So he paused. And the Grinch put his hand to his ear.
+And he did hear a sound rising over the snow.
+It started in low. Then it started to grow.
+But the sound wasnt sad! Why this sound sounded merry!
+It couldnt be so! But it WAS merry! VERY!
+He stared down at Whoville! The Grinch popped his eyes!
+Then he shook! What he saw was a shocking surprise!
+Every Who down in Whoville the tall and the small
+Was singing! Without any presents at all!
+He HADNT stopped Christmas from coming! IT CAME!
+Somehow or other it came just the same!
+And the Grinch with his grinch feet ice cold in the snow
+Stood puzzling and puzzling: How could it be so?
+It came with out ribbons! It came without tags!
+It came without packages boxes or bags!
+And he puzzled three hours till his puzzler was sore.
+Then the Grinch thought of something he hadnt before!
+Maybe Christmas he thought doesnt come from a store.
+Maybe Christmas perhaps means a little bit more!
+And what happened then? Wellin Whoville they say
+That the Grinchs small heart Grew three sizes that day!
+And the minute his heart didnt feel quite so tight
+He whizzed with his load through the bright morning light
+And he brought back the toys! And the food for the feast!
+And he HE HIMSELF! The Grinch carved the roast beast!
+UP PUP Pup is up.
+CUP PUP Pup in cup.
+PUP CUP Cup on pup.
+MOUSE HOUSE Mouse on house.
+HOUSE MOUSE House on mouse.
+ALL TALL We all are tall.
+ALL SMALL We all are small.
+ALL BALL We all play ball.
+BALL WALL Up on a wall.
+ALL FALL Fall off the wall.
+DAY PLAY We play all day.
+NIGHT FIGHT We fight all night.
+HE ME He is after me.
+HIM JIM Jim is after him.
+SEE BEE We see a bee.
+SEE BEE THREE Now we see three.
+THREE TREE Three fish in a tree.
+Fish in a tree? How can that be?
+RED RED They call me Red.
+RED BED I am in bed.
+RED NED TED and ED in BED
+PAT PAT they call him Pat.
+PAT SAT Pat sat on hat.
+PAT CAT Pat sat on cat.
+PAT BAT Pat sat on bat.
+NO PAT NO Don?????????????????? sit on that.
+SAD DAD BAD HAD Dad is sad.
+Very very sad.
+He had a bad day. What a day Dad had!
+THING THING What is that thing? THING SING That thing can sing!
+SONG LONG A long long song.
+Good by Thing. You sing too long.
+WALK WALK We like to walk.
+WALK TALK We like to talk.
+HOP POP We like to hop.
+We like to hop on top of Pop.
+STOP You must not hop on Pop.
+Mr. BROWN Mrs. BROWN
+Mr. Brown upside down.
+Pup up. Brown down.
+Pup is down. Where is Brown?
+WHERE IS BROWN? THERE IS BROWN!
+Mr. Brown is out of town.
+BACK BLACK Brown came back. Brown came back with Mr. Black.
+SNACK SNACK Eat a snack.
+Eat a snack with Brown and Black.
+JUMP BUMP He jumped. He bumped.
+FAST PAST He went past fast.
+WENT TENT SENT He went into the tent.
+I sent him out of the tent.
+WET GET Two dogs get wet.
+HELP YELP They yelp for help.
+HILL WILL Will went up hill.
+WILL HILL STILL Will is up hill still.
+FATHER MOTHER SISTER BROTHER
+That one is my other brother.
+My brothers read a little bit.
+Little words like If and it.
+My father can read big words too.
+Like CONSTANTINOPLE and TIMBUKTU
+SAY SAY What does this say?
+seehemewepatpup pop
+hethreetreebee
+tophopstop
+Ask me tomorrow but not today.
+One fish Two fish Red fish Blue fish
+Black fish Blue fish Old fish New fish.
+This one has a little car.
+This one has a little star.
+Say! What a lot of fish there are.
+Yes. Some are red and some are blue.
+Some are old and some are new.
+Some are sad and some are glad
+And some are very very bad.
+Why are they sad and glad and bad?
+I do not know go ask your dad.
+Some are thin and some are fat.
+The fat one has a yellow hat.
+From there to here
+From here to there
+Funny things are everywhere.
+Here are some who like to run.
+They run for fun in the hot hot sun.
+Oh me! Oh my! Oh me! oh my!
+What a lot of funny things go by.
+Some have two feet and some have four.
+Some have six feet and some have more.
+Where do they come from? I cant say.
+But I bet they have come a long long way.
+we see them come we see them go.
+Some are fast. Some are slow.
+Some are high. Some are low.
+Not one of them is like another.
+Dont ask us why go ask your mother.
+Say! Look at his fingers!
+One two three
+How many fingers do I see?
+One two three four
+five six seven eight nine ten.
+He has eleven!
+Eleven! This is something new.
+I wish I had eleven too!
+Bump! Bump! Bump!
+Did you ever ride a Wump?
+We have a Wump with just one hump.
+But we know a man called Mr. Gump.
+Mr. gump has a seven hump Wump. So
+If you like to go Bump! Bump!
+Just jump on the hump of the Wump of Gump
+Who am I? My name is Ned
+I do not like my little.
+This is no good. This is not right.
+My feet stick out of bed all night.
+And when I pull them in Oh Dear!
+My head sticks out of bed up here!
+We like our bike. It is made for three.
+Our Mike sits up in back you see.
+We like our Mike and this is why:
+Mike does all the work when the hills get high.
+Hello there Ned. How do you do?
+Tell me tell me what is new?
+How are things in your little bed?
+What is new? Please tell me Ned.
+I do not like this bed at all.
+a lot of things have come to call.
+A cow a dog a cat a mouse.
+Oh! What a bed! Oh! What a house!
+Oh dear oh dear! I cannot hear.
+Will you please come over near?
+Will you please look in my ear?
+There must be something there I fear.
+Say look! A bird was in your ear.
+But he is out. So have no fear.
+Again your ear can hear my dear.
+My hat is old my teeth are gold.
+I have a bird I like to hold.
+My shoe is off my foot is cold.
+My shoe is off my foot is cold.
+I have a bird I like to hold.
+My hat is old my teeth are gold.
+And now my story is all told.
+We took a look. We saw a Nook.
+On his head he had a hook.
+On his hook he had a book.
+On his book was How to Cook
+We saw him sit and try to cook
+But a Nook cant read so a Nook cant Cook.
+SO
+What good to a Nook is a hook cook book?
+the moon was out and we saw some sheep.
+We saw some sheep take a walk in their sleep.
+by the light of the moon by the light of a star;
+They walked all night from near to far.
+I would never walk. I would take a car.
+I do not like this one so well.
+all he does is yell yell yell.
+I will not have this one about.
+When he comes in I put him out.
+This one is quiet as a mouse.
+I like to have him in the house.
+At our house we open cans.
+We have to open many cans.
+and that is why we have a Zans.
+A Zans for cans is very good.
+Have you a Zans for cans? You should.
+I like to box. How I like to box.
+So every day I box a Gox.
+In yellow socks I box my Gox.
+I box in yellow Gox box socks.
+It is fun to sing if you sing with a Ying.
+My Ying can sing like anything.
+I sing high and my Ying sings low.
+And we are not too bad you know.
+this one I think is called a Yink.
+he likes to wink he likes to drink.
+He likes to drink and drink and drink.
+the thing he likes to drink is ink.
+The ink he likes to drink is pink.
+He likes to wink and drink pink ink.
+SO
+If you have a lot of ink
+you should get a Yink I think.
+Hop hop hop! I am a Yop
+All I like to do is hop
+From finger top to finger top.
+I hop from left to right and then
+Hop hop! I hop right back again.
+I like to hop all day and night.
+From right to left and left to right.
+Why do I like to hop hop hop?
+I do not know. Go ask your Pop.
+Brush brush brush brush
+Comb comb comb comb
+Blue hair is fun to brush and comb.
+All girls who like to brush and comb
+Should have a pet like this at home.
+Who is this pet? Say! He is wet.
+You never yet met a pet I bet
+As wet as they let this wet pet get.
+Did you ever fly a kite in bed?
+did you ever walk with ten cats on your head?
+Did you ever milk this kind of cow?
+Well we can do it. We know how.
+If you never did you should.
+These things are fun and fun is good.
+Hello hello. Are you there?
+Hello! I called you up to say hello.
+I said Hello.
+Can you hear me Joe?
+Oh no I cannot hear your call.
+I cannot hear your call at all.
+This is not good and I know why.
+A mouse has cut the wire goodbye!
+From near to far from here to there
+Funny things are everywhere.
+These yellow pets are called the Zeds.
+They have one hair upon their heads.
+Their hair grows fast. So fast they say
+They need a haircut every day.
+Who am I? My name is Ish
+On my hand I have a dish.
+I have this dish to help me wish.
+When I wish to make a wish
+I wave my hand with a big swish swish.
+Then I say I wish for fish!
+And I get fish right on my dish.
+So
+If you wish to make a wish
+you may swish for fish with my Ish wish dish.
+At our house we play out back.
+We play a game called ring the Gack.
+Would you like to play this game?
+Come down! We have the only Gack in town.
+Look what we found in the park in the dark.
+We will take him home we will call him Clark.
+He will live at our house he will grow and grow.
+Will our mother like this? We dont know.
+And now Good night.
+It is time to sleep
+So we will sleep with our pet Zeep.
+Today is gone. Today was fun.
+Tomorrow is another one.
+Every day from here to there.
+funny things are everywhere.
+    </textarea>
+  </div>
+  <div id="prepro_status"></div>
+
+  <div class="hh">Controls/Options:</div>
+  <button id="learn" class="abutton">learn/restart</button>
+  <button id="resume" class="abutton">resume</button>
+  <button id="stop" class="abutton">pause</button>
+  <!-- <button id="gradcheck">gradcheck</button> -->
+  <textarea id="newnet" style="width:100%; height:200px;">
+
+// model parameters
+generator = 'lstm'; // can be 'rnn' or 'lstm'
+hidden_sizes = [20,20]; // list of sizes of hidden layers
+letter_size = 5; // size of letter embeddings
+
+// optimization
+regc = 0.000001; // L2 regularization strength
+learning_rate = 0.01; // learning rate
+clipval = 5.0; // clip gradients at this value
+  </textarea><br />
+  protip: if your perplexity is exploding with Infinity try lowering the initial learning rate
+  <br>
+  <div id="status">
+
+    <div>
+      <div class="hh">Training stats:</div>
+      <div class="aslider">
+        <div class="slider_header">Learning rate: you want to anneal this over time if you're training for longer time.</div>
+        <div class="theslider" id="lr_slider"></div>
+        <div class="slider_value" id="lr_text"></div>
+      </div>
+
+      <canvas id="pplgraph"></canvas>
+      <div id="ticktime"></div>
+      <div id="gradclip"></div>
+      <div id="epoch"></div>
+      <div id="ppl"></div>
+
+      <div style="clear:both;"></div>
+    </div>
+
+    <div class="hh">Model samples:</div>
+    <div id="controls">
+      <div class="aslider">
+        <div class="slider_header">Softmax sample temperature: lower setting will generate more likely predictions, but you'll see more of the same common words again and again. Higher setting will generate less frequent words but you might see more spelling errors.</div>
+        <div class="theslider" id="temperature_slider"></div>
+        <div class="slider_value" id="temperature_text"></div>
+      </div>
+    </div>
+    <div id="samples"></div>
+    <div class="hh">Greedy argmax prediction:</div>
+    <div id="argmax"></div>
+  </div>
+  <div id="io">
+    <div class="hh">I/O save/load model JSON</div>
+
+    <button id="savemodel" class="abutton">save model</button>
+    <button id="loadmodel" class="abutton">load model</button>
+    <div>
+      You can save or load models with JSON using the textarea below.
+    </div>
+    <textarea style="width:100%; height:200px;" id="tio"></textarea>
+
+    <br>
+  </div>
+</div>
+
+</body>
+</html>

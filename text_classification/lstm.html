@@ -1,0 +1,103 @@
+<html>
+<head>
+    <title>Project Catapult</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.6.1/css/bulma.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.2/MathJax.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/2.5.3/vue.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.2.9/ace.js"></script>
+    <script src="https://unpkg.com/deeplearn"></script>
+    <script src="newsgroups/FileSaver.js"></script>
+    <script src="newsgroups/helpers.js"></script>
+    <style>
+        body {
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            right: 0;
+        }
+
+        #viewer, #editor {
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            right: 0;
+        }
+    </style>
+</head>
+<body>
+    <button style="position:absolute;top:5px;right:5px;z-index:5;width:8em;" class="button is-primary" onclick="run()">Run</button>
+    <button style="position:absolute;top:45px;right:5px;z-index:5;width:8em;" class="button is-info" onclick="download()">Download</button>
+    <button style="position:absolute;bottom:5px;right:5px;z-index:5;width:8em;" class="button is-danger" onclick="reset()">Reset</button>
+
+    <div id="editor"></div>
+
+    <div id="viewer" style="background-color:white;z-index:10">
+        <h1 class="title" style="text-align:center;padding-top:10%;">Welcome!</h1>
+        <p style="text-align:center;max-width:480px;margin:auto;">
+            Right click on the page and click <code>Inspect Element</code>. If you don't
+            see <code>Let's get started!</code>, try clicking on the <code>Console</code> 
+            tab. When you're ready, click the start button to start coding.
+        </p>
+        <br/>
+        <p style="text-align:center;max-width:480px;margin:auto;">
+            This editor is meant to be used with Google Chrome and is not tested on other
+            browsers.
+        </p>
+        <br/>
+        <p style="text-align:center;">
+            <button class="button is-primary" onclick="start()">Start</button>
+        </p>
+    </div>
+
+    <script>
+        console.log("Let's get started!")
+
+        var editor = ace.edit("editor");
+        editor.$blockScrolling = Infinity;
+        editor.setTheme("ace/theme/github");
+        editor.getSession().setMode("ace/mode/javascript");
+
+        function run() {
+            eval(editor.getValue())
+        }
+
+        function download() {
+            var blob = new Blob([editor.getValue()], {type: "text/plain;charset=utf-8"});
+            saveAs(blob, "catapult-" + parseInt((new Date()).getTime()/1000) + ".js");
+        }
+
+        function start() {
+            $('#viewer').hide()
+            localStorage.setItem("editor.started", true)
+        }
+
+        function reset() {
+            if (confirm("Are you sure? All data will be lost.")) {
+                editor.setValue("")
+                localStorage.setItem("editor.started", "")
+                localStorage.setItem("editor.code", "")
+                window.location.reload()
+            }
+        }
+
+        if (localStorage.getItem("editor.started")) {
+            start()
+        }
+
+        setInterval(function () {
+            localStorage.setItem("editor.code", editor.getValue())
+        }, 1000)
+
+        if (localStorage.getItem("editor.code")) {
+            editor.setValue(localStorage.getItem("editor.code"))
+        } else {
+            $.get("newsgroups/template.js", function (template) {
+                editor.setValue(template)
+            }, "text")
+        }
+    </script>
+</body>
+</html>
