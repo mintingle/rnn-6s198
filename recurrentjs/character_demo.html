@@ -270,7 +270,17 @@ var loadModel = function(j) {
 
 var forwardIndex = function(G, model, ix, prev) {
   var x = G.rowPluck(model['Wil'], ix);
-  // TODO: forward prop the sequence learner
+  // TODO Question 2: Fill in the broken lines below
+  // Hint: The following variables are available here. You won't need all of these variables, but you'll need some of them.
+  //  solver: a RecurrentJS solver
+  //  hidden_sizes: the size of the hidden state passed between cells
+  //  x: the input value for this cell
+  //  input_size: the dimensions of the input to the full model
+  //  output_size: the dimensions of the output of the full model
+  //  prev: the output of the previous cell
+  //  ix: the full input values for this training step
+  //  epoch_size: the number of training examples in an epoch
+  //  model: the full RecurrentJS model we're building
   if(generator === 'rnn') {
     // RNN
     //var out_struct = R.forwardRNN( , , , , );
